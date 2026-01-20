@@ -75,7 +75,7 @@ pub fn parse_results(resp: &Value) -> Option<Vec<SearchResult>> {
 }
 
 impl SearchResult {
-    #[must_use] 
+    #[must_use]
     pub fn link(&self) -> Cow<'_, str> {
         if let Some(id) = &self.video_id {
             Cow::Owned(format!("https://youtube.com/watch?v={id}"))

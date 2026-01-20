@@ -11,6 +11,7 @@ pub struct AccessToken {
     #[allow(clippy::struct_field_names)]
     access_token: String,
     token_type: String,
+    /// seconds
     expires_in: u64,
 
     #[serde(skip)]
@@ -67,9 +68,9 @@ impl AccessToken {
         Some(resp)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn expired(&self) -> bool {
         self.granted
-            .is_some_and(|g| g.elapsed() > Duration::from_secs(self.expires_in))
+            .is_none_or(|g| g.elapsed() > Duration::from_secs(self.expires_in))
     }
 }
