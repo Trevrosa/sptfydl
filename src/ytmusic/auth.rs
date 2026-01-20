@@ -9,7 +9,7 @@ impl Browser {
     /// Takes a "__Secure-3PAPISID" cookie and converts into the corresponding authorization header value.
     ///
     /// <https://github.com/sigma67/ytmusicapi/blob/21445ca6f3bff83fc4f4f4546fc316710f517731/ytmusicapi/helpers.py#L60>
-    #[must_use] 
+    #[must_use]
     pub fn new(sapisid: &str) -> Self {
         let timestamp = Utc::now().timestamp();
 
@@ -28,7 +28,7 @@ impl AsRef<str> for Browser {
 }
 
 /// Takes a list of headers (or just the Cookie header) and finds the "__Secure-3PAPISID" cookie.
-#[must_use] 
+#[must_use]
 pub fn parse_cookie(input: &str) -> Option<&str> {
     let cookies = if input.starts_with("Cookie: ") {
         input

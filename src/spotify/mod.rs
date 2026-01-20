@@ -25,31 +25,23 @@ pub fn extract_spotify(
     secret: &str,
     spotify_url: &str,
     no_interaction: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(Vec<String>, Option<String>)> {
     let token = load::<AccessToken>(SPOTIFY_TOKEN_CONFIG_NAME);
 
     let token = if let Ok(token) = token {
         debug!("got spotify token from cache");
         token
     } else {
-        spotify_request_token_and_save(id, secret)?
+        request_token_and_save(id, secret)?
     };
 
     let token = if token.expired() {
-        spotify_request_token_and_save(id, secret)?
+        request_token_and_save(id, secret)?
     } else {
         token
     };
 
-    let spotify_track = find_track_from_url(spotify_url, token)?;
-
-    let spotify_artists = spotify_track
-        .artists
-        .iter()
-        .map(|a| a.name.as_str())
-        .collect::<Vec<_>>();
-
-    debug!("extracted metadata: {spotify_track:#?}");
+    let (spotify_tracks, download_path) = find_track_from_url(spotify_url, token)?;
 
     let raw_cookie = if let Ok(cookie) = load_str(YTM_DATA_CONFIG_NAME) {
         cookie
@@ -84,47 +76,62 @@ pub fn extract_spotify(
 
     let auth = Browser::new(cookie);
 
-    let query = format!("{} {}", spotify_track.name, spotify_artists.join(" "));
-    let searched = ytmusic::search(query.as_str(), auth.as_ref())?;
+    let mut urls = Vec::with_capacity(spotify_tracks.len());
 
-    if !searched.status().is_success() {
-        let err = anyhow!(
-            "ytm api search endpoint failed with {}: {:?}",
-            searched.status(),
-            searched.text()
-        );
-        return Err(err);
+    for (i, spotify_track) in spotify_tracks.iter().enumerate() {
+        debug!("extracted metadata: {spotify_track:#?}");
+        let spotify_artists = spotify_track
+            .artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>();
+
+        info!("finding track {}", i + 1);
+
+        let query = format!("{} {}", spotify_track.name, spotify_artists.join(" "));
+        let searched = ytmusic::search(query.as_str(), auth.as_ref())?;
+
+        if !searched.status().is_success() {
+            let err = anyhow!(
+                "ytm api search endpoint failed with {}: {:?}",
+                searched.status(),
+                searched.text()
+            );
+            return Err(err);
+        }
+
+        let results = searched.json()?;
+
+        let Some(results) = ytmusic::parse_results(&results) else {
+            return Err(anyhow!("couldnt parse search results"));
+        };
+
+        if results.is_empty() {
+            return Err(anyhow!("search results was empty"));
+        }
+
+        debug!("got {} results", results.len());
+
+        let choice = if no_interaction {
+            debug!("choosing first result");
+
+            0
+        } else {
+            Select::new()
+                .with_prompt("Choose link to download")
+                .default(0)
+                .items(&results)
+                .interact()?
+        };
+
+        let url = results[choice].link().to_string();
+        urls.push(url);
     }
 
-    let results = searched.json()?;
-
-    let Some(results) = ytmusic::parse_results(&results) else {
-        return Err(anyhow!("couldnt parse search results"));
-    };
-
-    if results.is_empty() {
-        return Err(anyhow!("search results was empty"));
-    }
-
-    info!("got {} results", results.len());
-
-    let choice = if no_interaction {
-        debug!("choosing first result");
-
-        0
-    } else {
-        Select::new()
-            .with_prompt("Choose link to download")
-            .items(&results)
-            .interact()?
-    };
-
-    let url = results[choice].link();
-
-    Ok(url.to_string())
+    Ok((urls, download_path))
 }
 
-fn spotify_request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {
+pub fn request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {
     debug!("requesting new spotify access token");
     let Some(access_token) = AccessToken::get(id, secret) else {
         return Err(anyhow!("could not get access token"));

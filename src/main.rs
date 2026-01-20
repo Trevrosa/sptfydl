@@ -3,7 +3,7 @@ use clap::Parser;
 use dialoguer::{Input, Password};
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
-use tracing::{Level, error};
+use tracing::{Level, error, info};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use std::process::{Command, exit};
@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         oauth
     };
 
-    let url = extract_spotify(
+    let (urls, download_path) = extract_spotify(
         &oauth.client_id,
         &oauth.client_secret,
         &args.url,
@@ -72,24 +72,36 @@ fn main() -> anyhow::Result<()> {
     )
     .context("extracting youtube url from spotify")?;
 
+    info!("found {} tracks", urls.len());
+
     let mp3: &[&str] = if args.mp3 {
         &["--extract-audio", "--audio-format", "mp3"]
     } else {
         &[]
     };
 
-    let ytdlp = Command::new("yt-dlp")
-        .arg(url)
-        .args(["-f", "ba"])
-        .args(mp3)
-        .args(args.ytdlp_args)
-        .status();
+    let path: &[&str] = if let Some(path) = download_path.as_ref() {
+        &["-P", path]
+    } else {
+        &[]
+    };
 
-    if let Ok(status) = ytdlp
-        && !status.success() {
+    for url in urls {
+        let ytdlp = Command::new("yt-dlp")
+            .arg(url)
+            .args(["-f", "ba"])
+            .args(mp3)
+            .args(path)
+            .args(&args.ytdlp_args)
+            .status();
+
+        if let Ok(status) = ytdlp
+            && !status.success()
+        {
             error!("yt-dlp terminated with status code {status}");
             exit(1);
         }
+    }
 
     Ok(())
 }
