@@ -74,25 +74,21 @@ fn main() -> anyhow::Result<()> {
 
     info!("found {} tracks", urls.len());
 
-    let mp3: &[&str] = if args.mp3 {
-        &["--extract-audio", "--audio-format", "mp3"]
-    } else {
-        &[]
-    };
+    let mut ytdlp_args = args.ytdlp_args;
 
-    let path: &[&str] = if let Some(path) = download_path.as_ref() {
-        &["-P", path]
-    } else {
-        &[]
-    };
+    if args.mp3 {
+        ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
+    }
+
+    if let Some(path) = download_path {
+        ytdlp_args.extend(["-P".to_string(), path]);
+    }
 
     for url in urls {
         let ytdlp = Command::new("yt-dlp")
             .arg(url)
             .args(["-f", "ba"])
-            .args(mp3)
-            .args(path)
-            .args(&args.ytdlp_args)
+            .args(&ytdlp_args)
             .status();
 
         if let Ok(status) = ytdlp

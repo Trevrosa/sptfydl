@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use anyhow::anyhow;
 use reqwest::IntoUrl;
 use serde::Deserialize;
@@ -5,8 +7,8 @@ use tracing::info;
 
 use crate::CLIENT;
 
-/// Parse the track id from `url` and get a [`SpotifyTrack`] and the album or playlist name, if the `url` is one.
-pub fn find_track_from_url(
+/// Parse the track id from `url` and get a list of [`SpotifyTrack`]s, and the name (if playlist or album)
+pub fn get_from_url(
     url: impl IntoUrl,
     access_token: impl AsRef<str>,
 ) -> anyhow::Result<(Vec<SpotifyTrack>, Option<String>)> {
@@ -47,6 +49,12 @@ pub struct SpotifyTrack {
 #[derive(Deserialize, Debug)]
 pub struct SpotifyArtist {
     pub name: String,
+}
+
+impl Borrow<str> for SpotifyArtist {
+    fn borrow(&self) -> &str {
+        &self.name
+    }
 }
 
 // we can search youtube music by isrc by just using it as query.
@@ -109,9 +117,9 @@ pub fn find_album_tracks(
 
     let resp = resp.json::<Album>()?;
 
-    let artist = resp.artists.first().map_or("NO ARTIST", |n| &n.name);
+    let artists = resp.artists.join(", ");
 
-    Ok((resp.tracks.items, format!("{} - {artist}", resp.name)))
+    Ok((resp.tracks.items, format!("{} - {artists}", resp.name)))
 }
 
 #[derive(Deserialize, Debug)]

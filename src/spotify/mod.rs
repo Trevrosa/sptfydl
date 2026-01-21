@@ -4,7 +4,7 @@ pub use access_token::AccessToken;
 pub mod search;
 use anyhow::anyhow;
 use dialoguer::Select;
-pub use search::find_track_from_url;
+pub use search::get_from_url;
 
 use std::io::{Write, stdin, stdout};
 
@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     load, load_str, save, save_str,
+    spotify::search::SpotifyTrack,
     ytmusic::auth::{Browser, parse_cookie},
 };
 
@@ -41,7 +42,7 @@ pub fn extract_spotify(
         token
     };
 
-    let (spotify_tracks, download_path) = find_track_from_url(spotify_url, token)?;
+    let (spotify_tracks, name) = get_from_url(spotify_url, token)?;
 
     let raw_cookie = if let Ok(cookie) = load_str(YTM_DATA_CONFIG_NAME) {
         cookie
@@ -76,6 +77,16 @@ pub fn extract_spotify(
 
     let auth = Browser::new(cookie);
 
+    let urls = get_youtube(spotify_tracks, auth, no_interaction)?;
+
+    Ok((urls, name))
+}
+
+fn get_youtube(
+    spotify_tracks: Vec<SpotifyTrack>,
+    auth: Browser,
+    no_interaction: bool,
+) -> anyhow::Result<Vec<String>> {
     let mut urls = Vec::with_capacity(spotify_tracks.len());
 
     for (i, spotify_track) in spotify_tracks.iter().enumerate() {
@@ -89,7 +100,7 @@ pub fn extract_spotify(
         info!("finding track {}", i + 1);
 
         let query = format!("{} {}", spotify_track.name, spotify_artists.join(" "));
-        let searched = ytmusic::search(query.as_str(), auth.as_ref())?;
+        let searched = ytmusic::search(query.as_str(), None, auth.as_ref())?;
 
         if !searched.status().is_success() {
             let err = anyhow!(
@@ -102,13 +113,15 @@ pub fn extract_spotify(
 
         let results = searched.json()?;
 
-        let Some(results) = ytmusic::parse_results(&results) else {
+        let Some(mut results) = ytmusic::parse_results(&results) else {
             return Err(anyhow!("couldnt parse search results"));
         };
 
         if results.is_empty() {
             return Err(anyhow!("search results was empty"));
         }
+
+        results[0].title.push_str("Best Result");
 
         debug!("got {} results", results.len());
 
@@ -128,7 +141,7 @@ pub fn extract_spotify(
         urls.push(url);
     }
 
-    Ok((urls, download_path))
+    Ok(urls)
 }
 
 pub fn request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {

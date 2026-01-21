@@ -1,5 +1,6 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -21,7 +22,7 @@ fn save_dir<'a>() -> &'a Path {
     } else if let Ok(userprofile) = env::var("USERPROFILE") {
         Path::new(&userprofile).join(".config")
     } else {
-        tracing::warn!("could not find home directory, using cwd");
+        warn!("could not find home directory, using cwd");
         Path::new("./").to_path_buf()
     };
 
