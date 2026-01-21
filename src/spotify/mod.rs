@@ -77,14 +77,14 @@ pub fn extract_spotify(
 
     let auth = Browser::new(cookie);
 
-    let urls = get_youtube(spotify_tracks, auth, no_interaction)?;
+    let urls = get_youtube(spotify_tracks, &auth, no_interaction)?;
 
     Ok((urls, name))
 }
 
 fn get_youtube(
     spotify_tracks: Vec<SpotifyTrack>,
-    auth: Browser,
+    auth: &Browser,
     no_interaction: bool,
 ) -> anyhow::Result<Vec<String>> {
     let mut urls = Vec::with_capacity(spotify_tracks.len());

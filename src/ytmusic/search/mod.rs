@@ -94,10 +94,14 @@ pub fn search(
 
         if resp.status().is_success() {
             break Ok(resp);
-        } else {
-            warn!("got {}, retrying in {RETRY_DELAY:?} ({:?})", resp.status(), resp.text());
-            thread::sleep(RETRY_DELAY);
         }
+
+        warn!(
+            "got {}, retrying in {RETRY_DELAY:?} ({:?})",
+            resp.status(),
+            resp.text()
+        );
+        thread::sleep(RETRY_DELAY);
     }
 }
 

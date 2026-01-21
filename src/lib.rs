@@ -1,11 +1,11 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
     sync::{LazyLock, OnceLock},
 };
+use tracing::warn;
 
 pub mod spotify;
 pub mod ytmusic;
