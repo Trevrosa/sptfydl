@@ -4,7 +4,7 @@ use console::Term;
 use dialoguer::{Input, Password};
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
-use tracing::{Level, error, info};
+use tracing::{Level, error, info, warn};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use std::process::{Command, exit};
