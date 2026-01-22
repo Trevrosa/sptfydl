@@ -1,5 +1,6 @@
 use anyhow::Context;
-use clap::Parser;
+use clap::{ArgAction, Parser};
+use console::Term;
 use dialoguer::{Input, Password};
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
@@ -44,6 +45,8 @@ fn main() -> anyhow::Result<()> {
         .with(fmt::layer().without_time().compact())
         .with(Targets::new().with_target("sptfydl", filter))
         .init();
+
+    ctrlc::set_handler(handle_exit)?;
 
     let oauth: SpotifyOauth = if let Ok(oauth) = load(SPOTIFY_CONFIG_NAME) {
         oauth
@@ -100,6 +103,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_exit() {
+    let term = Term::stdout();
+    if let Err(err) = term.show_cursor() {
+        warn!("failed to show cursor: {err}");
+    }
 }
 
 const SPOTIFY_CONFIG_NAME: &str = "spotify_oauth.yaml";
