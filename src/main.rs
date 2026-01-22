@@ -18,9 +18,9 @@ struct Args {
     #[arg(long)]
     mp3: bool,
 
-    /// Be a bit more verbose
-    #[arg(short, long)]
-    verbose: bool,
+    /// Be a bit more verbose. Can be applied more than once (-v, -vv)
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 
     /// Skip prompts. Always choose the first option.
     #[arg(short, long)]
@@ -34,10 +34,10 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let filter = if args.verbose {
-        Level::DEBUG
-    } else {
-        Level::INFO
+    let filter = match args.verbose {
+        0 => Level::INFO,
+        1 => Level::DEBUG,
+        2..=u8::MAX => Level::TRACE,
     };
 
     tracing_subscriber::registry()
