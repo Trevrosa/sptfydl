@@ -157,6 +157,7 @@ fn handle_exit() {
     if let Err(err) = term.show_cursor() {
         warn!("failed to show cursor: {err}");
     }
+    exit(1);
 }
 
 /// returns `true` on success
