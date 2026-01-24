@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         oauth
     };
 
-    let (urls, download_path) = extract_spotify(
+    let extraction = extract_spotify(
         &oauth.client_id,
         &oauth.client_secret,
         &args.url,
@@ -81,12 +81,12 @@ fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
     }
 
-    if let Some(path) = download_path {
+    if let Some(path) = extraction.name.clone() {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
     let mut failed = Vec::new();
-    for (i, url) in &urls {
+    for (i, url) in &extraction.urls {
         ytdlp(url, i + 1, &ytdlp_args, Some(&mut failed));
     }
 
@@ -120,6 +120,20 @@ fn main() -> anyhow::Result<()> {
         }
 
         failed = new_failed;
+    }
+
+    if !extraction.warnings.is_empty() {
+        warn!(
+            "these urls could be incorrect: {:#?}",
+            extraction.warning_urls()
+        );
+    }
+
+    if extraction.failures > 0 {
+        warn!(
+            "{} songs failed, check report named `failed-...`",
+            extraction.failures
+        );
     }
 
     Ok(())

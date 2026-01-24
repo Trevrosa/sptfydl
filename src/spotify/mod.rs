@@ -28,6 +28,22 @@ use super::ytmusic;
 const SPOTIFY_TOKEN_CONFIG_NAME: &str = "spotify_token.yaml";
 const YTM_DATA_CONFIG_NAME: &str = "ytm_browser_data";
 
+#[derive(Debug)]
+pub struct Extraction {
+    pub urls: Vec<(usize, String)>,
+    pub name: Option<String>,
+    /// guaranteed to be in range of `urls`
+    pub warnings: Vec<usize>,
+    pub failures: usize,
+}
+
+impl Extraction {
+    #[must_use]
+    pub fn warning_urls(&self) -> Vec<&String> {
+        self.warnings.iter().map(|idx| &self.urls[*idx].1).collect()
+    }
+}
+
 /// Returns `Vec<(usize, String)>` because some tracks may not be found from ytmusic,
 /// so some tracks may be missing,
 /// so we return the track number as well
@@ -47,7 +63,7 @@ pub fn extract_spotify(
     secret: &str,
     spotify_url: &str,
     no_interaction: bool,
-) -> anyhow::Result<(Vec<(usize, String)>, Option<String>)> {
+) -> anyhow::Result<Extraction> {
     let token = load::<AccessToken>(SPOTIFY_TOKEN_CONFIG_NAME);
 
     let token = if let Ok(token) = token {
@@ -104,12 +120,34 @@ pub fn extract_spotify(
     let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
     let auth = Browser::new(cookie);
 
-    let urls = get_youtube(name.as_deref(), &spotify_tracks, &auth, no_interaction);
+    let (urls, warnings, failed) = get_youtube(&spotify_tracks, &auth, no_interaction);
+
+    if !failed.is_empty() {
+        if !no_interaction {
+            warn!("{} songs failed, check report", failed.len());
+        }
+
+        let report = failed.iter().fold(String::new(), |mut report, (n, t)| {
+            let _ = writeln!(report, "track #{n}: {t:#?}");
+            report
+        });
+        if let Some(ref name) = name {
+            let _ = fs::write(format!("failed-{name}.txt"), report);
+        } else {
+            let name = Utc::now().timestamp();
+            let _ = fs::write(format!("failed-{name}.txt"), report);
+        }
+    }
 
     if urls.is_empty() {
         Err(anyhow!("got no urls"))
     } else {
-        Ok((urls, name))
+        Ok(Extraction {
+            urls,
+            name,
+            warnings,
+            failures: failed.len(),
+        })
     }
 }
 
@@ -117,14 +155,18 @@ const RETRY_DELAY: Duration = Duration::from_secs(5);
 
 const MAX_RETRIES: usize = 3;
 
-fn get_youtube(
-    name: Option<&str>,
-    spotify_tracks: &[SpotifyTrack],
+fn get_youtube<'a>(
+    spotify_tracks: &'a [SpotifyTrack],
     auth: &Browser,
     no_interaction: bool,
-) -> Vec<(usize, String)> {
+) -> (
+    Vec<(usize, String)>,
+    Vec<usize>,
+    Vec<(usize, &'a SpotifyTrack)>,
+) {
     let mut urls = Vec::with_capacity(spotify_tracks.len());
 
+    let mut warnings = Vec::new();
     let mut failed = Vec::new();
 
     'tracks: for (i, spotify_track) in spotify_tracks.iter().enumerate() {
@@ -211,27 +253,17 @@ fn get_youtube(
         }
         .unwrap_or(0);
 
+        if no_interaction && choice != 0 {
+            warn!("--no-interaction was set but the best result was not available");
+            warnings.push(i);
+        }
+
         let url = results[choice].link_or_default().to_string();
 
         urls.push((i, url));
     }
 
-    if !failed.is_empty() {
-        warn!("{} songs failed, check report", failed.len());
-
-        let report = failed.iter().fold(String::new(), |mut report, (n, t)| {
-            let _ = writeln!(report, "track #{n}: {t:#?}");
-            report
-        });
-        if let Some(name) = name {
-            let _ = fs::write(format!("failed-{name}.txt"), report);
-        } else {
-            let name = Utc::now().timestamp();
-            let _ = fs::write(format!("failed-{name}.txt"), report);
-        }
-    }
-
-    urls
+    (urls, warnings, failed)
 }
 
 /// # Errors
