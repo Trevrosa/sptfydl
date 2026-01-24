@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut failed = Vec::new();
-    for (i, url) in urls {
+    for (i, url) in &urls {
         ytdlp(url, i + 1, &ytdlp_args, Some(&mut failed));
     }
 
@@ -94,26 +94,32 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    info!("these urls failed to download: {failed:?}");
+    while !failed.is_empty() {
+        info!("these urls failed to download: {failed:?}");
 
-    let retry_urls = || {
-        for (i, url) in failed {
-            // we dont +1 to i because we already did in previous call to `ytdlp`, and we are using its output
-            ytdlp(url, i, &ytdlp_args, None);
-        }
-    };
+        let mut new_failed = Vec::with_capacity(failed.len());
 
-    if args.no_interaction {
-        debug!("retrying because --no-interaction was set");
-        retry_urls();
-    } else {
-        let retry = Confirm::new()
-            .with_prompt("retry urls?")
-            .default(true)
-            .interact();
-        if retry.is_ok_and(|r| r) {
+        let retry_urls = || {
+            for (i, url) in failed {
+                // we dont +1 to i because we already did in previous call to `ytdlp`, and we are using its output
+                ytdlp(url, i, &ytdlp_args, Some(&mut new_failed));
+            }
+        };
+
+        if args.no_interaction {
+            debug!("retrying because --no-interaction was set");
             retry_urls();
+        } else {
+            let retry = Confirm::new()
+                .with_prompt("retry urls?")
+                .default(true)
+                .interact();
+            if retry.is_ok_and(|r| r) {
+                retry_urls();
+            }
         }
+
+        failed = new_failed;
     }
 
     Ok(())
@@ -127,16 +133,16 @@ fn handle_exit() {
 }
 
 #[inline]
-fn ytdlp(
-    url: String,
+fn ytdlp<'a>(
+    url: &'a str,
     track_num: usize,
     args: &[String],
-    failed: Option<&mut Vec<(usize, String)>>,
+    failed: Option<&mut Vec<(usize, &'a str)>>,
 ) {
     // yt-dlp output template
     let template = format!("{track_num}. %(title)s [%(id)s].%(ext)s");
     let ytdlp = Command::new("yt-dlp")
-        .arg(&url)
+        .arg(url)
         .args(["-o", &template])
         .args(["-f", "ba"])
         .args(args)

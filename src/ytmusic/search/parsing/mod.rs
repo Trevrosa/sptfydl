@@ -76,9 +76,17 @@ pub fn parse_results(resp: &Value) -> Option<Vec<SearchResult>> {
 
 impl SearchResult {
     #[must_use]
-    pub fn link(&self) -> Cow<'_, str> {
-        if let Some(id) = &self.video_id {
-            Cow::Owned(format!("https://youtube.com/watch?v={id}"))
+    pub fn link(&self) -> Option<String> {
+        self.video_id
+            .as_ref()
+            .map(|id| format!("https://youtube.com/watch?v={id}"))
+    }
+
+    /// Returns the result of [`Self::link`] or "NO LINK FOUND"
+    #[must_use]
+    pub fn link_or_default(&self) -> Cow<'_, str> {
+        if let Some(link) = self.link() {
+            Cow::Owned(link)
         } else {
             Cow::Borrowed("NO LINK FOUND")
         }
@@ -87,7 +95,7 @@ impl SearchResult {
 
 impl Display for SearchResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}: {}", self.title, self.link())
+        write!(f, "{:?}: {}", self.title, self.link_or_default())
     }
 }
 

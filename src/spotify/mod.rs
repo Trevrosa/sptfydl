@@ -190,6 +190,12 @@ fn get_youtube(
                 continue;
             }
 
+            if results[0].video_id.is_none() {
+                warn!("could not find url of first search result, retrying in {RETRY_DELAY:?}");
+                thread::sleep(RETRY_DELAY);
+                continue;
+            }
+
             break results;
         };
 
@@ -210,7 +216,8 @@ fn get_youtube(
                 .unwrap_or(0)
         };
 
-        let url = results[choice].link().to_string();
+        let url = results[choice].link_or_default().to_string();
+
         urls.push((i, url));
     }
 
