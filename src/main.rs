@@ -85,9 +85,11 @@ fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
+    let single = extraction.urls.len() == 1;
+
     let mut failed = Vec::new();
     for (i, url) in &extraction.urls {
-        ytdlp(url, i + 1, &ytdlp_args, Some(&mut failed));
+        ytdlp(url, i + 1, single, &ytdlp_args, Some(&mut failed));
     }
 
     while !failed.is_empty() {
@@ -98,7 +100,7 @@ fn main() -> anyhow::Result<()> {
         let retry_urls = || {
             for (i, url) in failed {
                 // we dont +1 to i because we already did in previous call to `ytdlp`, and we are using its output
-                ytdlp(url, i, &ytdlp_args, Some(&mut new_failed));
+                ytdlp(url, i, single, &ytdlp_args, Some(&mut new_failed));
             }
         };
 
@@ -146,14 +148,19 @@ fn handle_exit() {
 fn ytdlp<'a>(
     url: &'a str,
     track_num: usize,
+    single: bool,
     args: &[String],
     failed: Option<&mut Vec<(usize, &'a str)>>,
 ) {
-    // yt-dlp output template
-    let template = format!("{track_num}. %(title)s [%(id)s].%(ext)s");
-    let ytdlp = Command::new("yt-dlp")
-        .arg(url)
-        .args(["-o", &template])
+    let mut ytdlp = Command::new("yt-dlp");
+    
+    ytdlp.arg(url);
+    if !single {
+        // yt-dlp output template
+        ytdlp.args(["-o", &format!("{track_num}. %(title)s [%(id)s].%(ext)s")]);
+    };
+
+    let ytdlp = ytdlp
         .args(["-f", "ba"])
         .args(args)
         .stdout(Stdio::inherit())
