@@ -190,12 +190,6 @@ fn get_youtube(
                 continue;
             }
 
-            if results[0].video_id.is_none() {
-                warn!("could not find url of first search result, retrying in {RETRY_DELAY:?}");
-                thread::sleep(RETRY_DELAY);
-                continue;
-            }
-
             break results;
         };
 
@@ -206,15 +200,16 @@ fn get_youtube(
         let choice = if no_interaction {
             debug!("choosing first result");
 
-            0
+            results.iter().position(|r| r.video_id.is_some())
         } else {
             Select::new()
                 .with_prompt("Choose link to download")
                 .default(0)
                 .items(&results)
                 .interact()
-                .unwrap_or(0)
-        };
+                .ok()
+        }
+        .unwrap_or(0);
 
         let url = results[choice].link_or_default().to_string();
 
