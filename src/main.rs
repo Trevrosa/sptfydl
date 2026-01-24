@@ -90,10 +90,6 @@ fn main() -> anyhow::Result<()> {
         ytdlp(url, i + 1, &ytdlp_args, Some(&mut failed));
     }
 
-    if failed.is_empty() {
-        return Ok(());
-    }
-
     while !failed.is_empty() {
         info!("these urls failed to download: {failed:?}");
 
