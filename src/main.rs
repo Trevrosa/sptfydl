@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
         ytdlp(url, i + 1, single, &ytdlp_args, Some(&mut failed));
     }
 
+    // gets reset to 0 on success!
     let mut tries = 0;
     while !failed.is_empty() {
         tries += 1;
@@ -107,7 +108,9 @@ fn main() -> anyhow::Result<()> {
         let retry_urls = || {
             for (i, url) in failed {
                 // we dont +1 to i because we already did in previous call to `ytdlp`, and we are using its output
-                ytdlp(url, i, single, &ytdlp_args, Some(&mut new_failed));
+                if ytdlp(url, i, single, &ytdlp_args, Some(&mut new_failed)) {
+                    tries = 0;
+                }
             }
         };
 
@@ -124,8 +127,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        if new_failed.len() == len && tries == RETRY_LIMIT {
-            warn!("failed urls not succeeding after {RETRY_LIMIT} tries");
+        if tries == RETRY_LIMIT && new_failed.len() == len {
+            warn!("failed urls not succeeding after {RETRY_LIMIT} tries, stopping");
+            break;
         }
 
         failed = new_failed;
@@ -155,6 +159,7 @@ fn handle_exit() {
     }
 }
 
+/// returns `true` on success
 #[inline]
 fn ytdlp<'a>(
     url: &'a str,
@@ -162,9 +167,9 @@ fn ytdlp<'a>(
     single: bool,
     args: &[String],
     failed: Option<&mut Vec<(usize, &'a str)>>,
-) {
+) -> bool {
     let mut ytdlp = Command::new("yt-dlp");
-    
+
     ytdlp.arg(url);
     if !single {
         // yt-dlp output template
@@ -181,7 +186,7 @@ fn ytdlp<'a>(
         let status = output.status;
 
         if status.success() {
-            return;
+            return true;
         }
 
         let stderr = str::from_utf8(&output.stderr);
@@ -196,6 +201,8 @@ fn ytdlp<'a>(
             }
         }
     }
+
+    false
 }
 
 const SPOTIFY_CONFIG_NAME: &str = "spotify_oauth.yaml";
