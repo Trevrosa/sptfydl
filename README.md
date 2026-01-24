@@ -12,7 +12,7 @@ Arguments:
 Options:
       --mp3             Tell yt-dlp to convert to mp3
   -v, --verbose...      Be a bit more verbose. Can be applied more than once (-v, -vv)
-  -n, --no-interaction  Skip prompts. Always choose the first option
+  -n, --no-interaction  Skip prompts. Always choose the default or first available option
   -h, --help            Print help
   -V, --version         Print version
 ```
