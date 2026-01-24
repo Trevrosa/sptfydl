@@ -3,7 +3,6 @@ pub use access_token::AccessToken;
 
 pub mod search;
 use anyhow::anyhow;
-use chrono::Utc;
 use dialoguer::Select;
 pub use search::get_from_url;
 
@@ -39,8 +38,8 @@ pub struct Extraction {
 
 impl Extraction {
     #[must_use]
-    pub fn warning_urls(&self) -> Vec<&String> {
-        self.warnings.iter().map(|idx| &self.urls[*idx].1).collect()
+    pub fn warnings(&self) -> Vec<&(usize, String)> {
+        self.warnings.iter().map(|idx| &self.urls[*idx]).collect()
     }
 }
 
@@ -83,39 +82,7 @@ pub fn extract_spotify(
 
     info!("got {} tracks", spotify_tracks.len());
 
-    let raw_cookie = if let Ok(cookie) = load_str(YTM_DATA_CONFIG_NAME) {
-        cookie
-    } else {
-        info!("no saved ytm cookie, need input.");
-        info!(
-            "please go to https://music.youtube.com and copy-paste your headers to an authenticatied POST request. (https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html#copy-authentication-headers)"
-        );
-
-        // FIXME: could use dialoguer::Editor
-
-        if no_interaction {
-            return Err(anyhow!(
-                "required interaction to set cookie but --no-interaction was set."
-            ));
-        }
-
-        print!("input: ");
-        let _ = stdout().flush();
-        let cookie = stdin()
-            .lines()
-            .find(|l| {
-                l.as_ref().is_ok_and(|l| {
-                    l.starts_with("Cookie: ") || l.trim_ascii_start().starts_with("\"cookie:")
-                })
-            })
-            .expect("waiting forever for line")?;
-
-        if let Err(err) = save_str(&cookie, YTM_DATA_CONFIG_NAME) {
-            warn!("failed to save yt cookie: {err}");
-        }
-
-        cookie
-    };
+    let raw_cookie = get_cookies(no_interaction)?;
 
     let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
     let auth = Browser::new(cookie);
@@ -131,12 +98,11 @@ pub fn extract_spotify(
             let _ = writeln!(report, "track #{n}: {t:#?}");
             report
         });
-        if let Some(ref name) = name {
-            let _ = fs::write(format!("failed-{name}.txt"), report);
-        } else {
-            let name = Utc::now().timestamp();
-            let _ = fs::write(format!("failed-{name}.txt"), report);
-        }
+
+        let name = name.as_deref().unwrap_or(&spotify_tracks[0].name);
+        let path = format!("failed-{name}.txt");
+
+        let _ = fs::write(path, report);
     }
 
     if urls.is_empty() {
@@ -240,9 +206,9 @@ fn get_youtube<'a>(
         debug!("got {} results", results.len());
 
         let choice = if no_interaction {
-            debug!("choosing first result");
-
-            results.iter().position(|r| r.video_id.is_some())
+            let choice = results.iter().position(|r| r.video_id.is_some());
+            debug!("default choice was {choice:?}");
+            choice
         } else {
             Select::new()
                 .with_prompt("Choose link to download")
@@ -254,7 +220,7 @@ fn get_youtube<'a>(
         .unwrap_or(0);
 
         if no_interaction && choice != 0 {
-            warn!("--no-interaction was set but the best result was not available");
+            warn!("the best result was not available and --no-interaction was set.");
             warnings.push(i);
         }
 
@@ -266,9 +232,45 @@ fn get_youtube<'a>(
     (urls, warnings, failed)
 }
 
+#[inline]
+fn get_cookies(no_interaction: bool) -> anyhow::Result<String> {
+    if let Ok(cookie) = load_str(YTM_DATA_CONFIG_NAME) {
+        Ok(cookie)
+    } else {
+        info!("no saved ytm cookie, need input.");
+        info!(
+            "please go to https://music.youtube.com and copy-paste your headers to an authenticatied POST request. (https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html#copy-authentication-headers)"
+        );
+
+        if no_interaction {
+            return Err(anyhow!(
+                "required interaction to set cookie but --no-interaction was set."
+            ));
+        }
+
+        print!("input: ");
+        let _ = stdout().flush();
+        let cookie = stdin()
+            .lines()
+            .find(|l| {
+                l.as_ref().is_ok_and(|l| {
+                    l.starts_with("Cookie: ") || l.trim_ascii_start().starts_with("\"cookie:")
+                })
+            })
+            .expect("waiting forever for line")?;
+
+        if let Err(err) = save_str(&cookie, YTM_DATA_CONFIG_NAME) {
+            warn!("failed to save yt cookie: {err}");
+        }
+
+        Ok(cookie)
+    }
+}
+
 /// # Errors
 ///
 /// This function fails if we could not get a new [`AccessToken`].
+#[inline]
 pub fn request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {
     debug!("requesting new spotify access token");
     let Some(access_token) = AccessToken::get(id, secret) else {

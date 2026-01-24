@@ -120,14 +120,14 @@ fn main() -> anyhow::Result<()> {
 
     if !extraction.warnings.is_empty() {
         warn!(
-            "these urls could be incorrect: {:#?}",
-            extraction.warning_urls()
+            "these tracks could be incorrect: {:#?}",
+            extraction.warnings()
         );
     }
 
     if extraction.failures > 0 {
         warn!(
-            "{} songs failed, check report named `failed-...`",
+            "{} songs failed, check report named `failed-...txt`",
             extraction.failures
         );
     }
