@@ -16,6 +16,14 @@ const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0";
 
 /// Search youtube music by `query`, using authentication `auth`.
+///
+/// # Errors
+///
+/// This function fails if we fail to send the request to ytmusic.
+///
+/// # Panics
+///
+/// This function panics if we fail to [`get_base`] or to extract its cookies.
 pub fn search(
     query: impl AsRef<str>,
     filter: Option<SearchFilter>,

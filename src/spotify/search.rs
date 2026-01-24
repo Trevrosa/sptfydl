@@ -8,6 +8,13 @@ use tracing::{debug, info};
 use crate::CLIENT;
 
 /// Parse the spotify id from `url` and get a list of [`SpotifyTrack`]s and the name (of the playlist or album, if `url` is one.)
+///
+/// # Errors
+///
+/// This function fails if:
+/// - `url` was not a spotify url.
+/// - We failed to find an id from `url`.
+/// - We failed to run [`find_track`], [`find_playlist_tracks`], or [`find_album_tracks`].
 pub fn get_from_url(
     url: impl IntoUrl,
     access_token: impl AsRef<str>,
@@ -69,7 +76,9 @@ impl Borrow<str> for SpotifyArtist {
     }
 }
 
-// we can search youtube music by isrc by just using it as query.
+/// # Errors
+///
+/// See [`get_resp`].
 pub fn find_track(
     track_id: impl AsRef<str>,
     access_token: impl AsRef<str>,
@@ -98,6 +107,9 @@ struct AlbumTracks {
     items: Vec<SpotifyTrack>,
 }
 
+/// # Errors
+///
+/// See [`get_resp`].
 pub fn find_album_tracks(
     id: impl AsRef<str>,
     access_token: impl AsRef<str>,
@@ -146,6 +158,9 @@ struct PlaylistPagination {
     items: Vec<PlaylistTrack>,
 }
 
+/// # Errors
+///
+/// See [`get_resp`].
 pub fn find_playlist_tracks(
     id: impl AsRef<str>,
     access_token: impl AsRef<str>,
@@ -179,6 +194,12 @@ pub fn find_playlist_tracks(
     Ok((tracks, format!("{} - {owner}", resp.name)))
 }
 
+/// # Errors
+///
+/// This function fails if:
+/// - We could not send the request to `url`.
+/// - The request was not successful.
+/// - We could not deserialize the response as json to `T`.
 fn get_resp<T: for<'a> Deserialize<'a>>(url: &str, access_token: &str) -> anyhow::Result<T> {
     let resp = CLIENT.get(url).bearer_auth(access_token).send()?;
 

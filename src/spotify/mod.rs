@@ -31,6 +31,17 @@ const YTM_DATA_CONFIG_NAME: &str = "ytm_browser_data";
 /// Returns `Vec<(usize, String)>` because some tracks may not be found from ytmusic,
 /// so some tracks may be missing,
 /// so we return the track number as well
+///
+/// # Errors
+///
+/// This function fails if:
+/// - We could not get a new [`AccessToken`], and one is not cached.
+/// - Cookies were required to be prompted and `no_interaction` was true.
+/// - We got no urls from ytmusic.
+///
+/// # Panics
+///
+/// This function panics if we could not get the cookies from `stdin`.
 pub fn extract_spotify(
     id: &str,
     secret: &str,
@@ -89,13 +100,17 @@ pub fn extract_spotify(
 
         cookie
     };
-    let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
 
+    let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
     let auth = Browser::new(cookie);
 
-    let urls = get_youtube(name.as_deref(), &spotify_tracks, &auth, no_interaction)?;
+    let urls = get_youtube(name.as_deref(), &spotify_tracks, &auth, no_interaction);
 
-    Ok((urls, name))
+    if urls.is_empty() {
+        Err(anyhow!("got no urls"))
+    } else {
+        Ok((urls, name))
+    }
 }
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -107,7 +122,7 @@ fn get_youtube(
     spotify_tracks: &[SpotifyTrack],
     auth: &Browser,
     no_interaction: bool,
-) -> anyhow::Result<Vec<(usize, String)>> {
+) -> Vec<(usize, String)> {
     let mut urls = Vec::with_capacity(spotify_tracks.len());
 
     let mut failed = Vec::new();
@@ -157,7 +172,11 @@ fn get_youtube(
                 continue;
             }
 
-            let results = searched.json()?;
+            let Ok(results) = searched.json() else {
+                warn!("couldnt deserialize response as json, retrying in {RETRY_DELAY:?}");
+                thread::sleep(RETRY_DELAY);
+                continue;
+            };
 
             let Some(results) = ytmusic::parse_results(&results) else {
                 warn!("couldnt parse search results, retrying in {RETRY_DELAY:?}");
@@ -187,7 +206,8 @@ fn get_youtube(
                 .with_prompt("Choose link to download")
                 .default(0)
                 .items(&results)
-                .interact()?
+                .interact()
+                .unwrap_or(0)
         };
 
         let url = results[choice].link().to_string();
@@ -198,7 +218,7 @@ fn get_youtube(
         warn!("{} songs failed, check report", failed.len());
 
         let report = failed.iter().fold(String::new(), |mut report, (n, t)| {
-            let _ = write!(report, "track #{n}: {t:#?}\n");
+            let _ = writeln!(report, "track #{n}: {t:#?}");
             report
         });
         if let Some(name) = name {
@@ -209,9 +229,12 @@ fn get_youtube(
         }
     }
 
-    Ok(urls)
+    urls
 }
 
+/// # Errors
+///
+/// This function fails if we could not get a new [`AccessToken`].
 pub fn request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {
     debug!("requesting new spotify access token");
     let Some(access_token) = AccessToken::get(id, secret) else {

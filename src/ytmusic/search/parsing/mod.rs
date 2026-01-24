@@ -25,7 +25,7 @@ pub fn parse_results(resp: &Value) -> Option<Vec<SearchResult>> {
 
     let results = resp
         .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content")
-        .unwrap_or_else(|| resp.get("contents").expect("no contents"));
+        .map_or_else(|| resp.get("contents"), Some)?;
 
     // https://github.com/sigma67/ytmusicapi//blob/a979691bb03c1cb5e7e39985bbd4014187940d68/ytmusicapi/navigation.py#L115
     let section_list = results.pointer(SECTION_LIST)?.as_array()?;

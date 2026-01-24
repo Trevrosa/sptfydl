@@ -35,21 +35,35 @@ fn save_dir<'a>() -> &'a Path {
     DIR.get_or_init(|| config_dir)
 }
 
+/// # Errors
+///
+/// - See [`fs::write`].
+/// - [`serde_yaml`] serialization failed.
 pub fn save<T: Serialize>(obj: &T, name: &str) -> anyhow::Result<()> {
     fs::write(save_dir().join(name), serde_yaml::to_string(obj)?)?;
     Ok(())
 }
 
+/// # Errors
+///
+/// - See [`fs::write`].
+/// - [`serde_yaml`] deserialization failed.
 pub fn load<T: for<'a> Deserialize<'a>>(name: &str) -> anyhow::Result<T> {
     let file = fs::read_to_string(save_dir().join(name))?;
     Ok(serde_yaml::from_str(&file)?)
 }
 
+/// # Errors
+///
+/// See [`fs::write`].
 pub fn save_str(contents: &str, name: &str) -> io::Result<()> {
     fs::write(save_dir().join(name), contents)
 }
 
-pub fn load_str(name: &str) -> anyhow::Result<String> {
+/// # Errors
+///
+/// See [`fs::write`].
+pub fn load_str(name: &str) -> io::Result<String> {
     let file = fs::read_to_string(save_dir().join(name))?;
     Ok(file)
 }
