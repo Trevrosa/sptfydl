@@ -1,6 +1,6 @@
 # sptfydl
 
-A simple CLI tool that allows you to download Spotify tracks, albums, and playlists. Requires [https://github.com/yt-dlp/yt-dlp](yt-dlp).
+A simple CLI tool that allows you to download Spotify tracks, albums, and playlists. Requires [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
 ```
 Usage: sptfydl.exe [OPTIONS] <URL> [-- <YTDLP_ARGS>...]
