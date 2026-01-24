@@ -23,7 +23,7 @@ struct Args {
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 
-    /// Skip prompts. Always choose the first option.
+    /// Skip prompts. Always choose the default or first available option.
     #[arg(short, long)]
     no_interaction: bool,
 
