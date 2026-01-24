@@ -1,17 +1,13 @@
 pub mod parsing;
 
-use std::{
-    sync::OnceLock,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{sync::OnceLock, time::Instant};
 
 use anyhow::anyhow;
 use chrono::{Datelike, Utc};
 use regex::Regex;
 use reqwest::{blocking::Response, header::HeaderMap};
 use serde_json::{Value, json};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::CLIENT;
 
@@ -63,46 +59,24 @@ pub fn search(
         cookies
     });
 
-    let visitor_id = VISITOR_ID.get_or_init(|| parse_visitor_id(&base_resp).unwrap());
+    let visitor_id = VISITOR_ID.get_or_init(|| parse_visitor_id(base_resp).unwrap());
 
-    const RETRY_DELAY: Duration = Duration::from_secs(5);
+    let resp = CLIENT
+        .post(SEARCH_API)
+        .json(&body)
+        // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L169
+        .header("Authentication", auth)
+        // https://github.com/sigma67/ytmusicapi//blob/fe95f5974efd7ba8b87ba030a1f528afe41a5a31/ytmusicapi/constants.py#L3
+        .query(&[("alt", "json")])
+        .headers(base_headers())
+        .header("Cookie", cookies)
+        // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L164
+        .header("X-Goog-Visitor-Id", visitor_id)
+        // // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L180
+        // .header("X-Goog-Request-Time", Utc::now().timestamp().to_string())
+        .send()?;
 
-    loop {
-        let resp = CLIENT
-            .post(SEARCH_API)
-            .json(&body)
-            // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L169
-            .header("Authentication", auth)
-            // https://github.com/sigma67/ytmusicapi//blob/fe95f5974efd7ba8b87ba030a1f528afe41a5a31/ytmusicapi/constants.py#L3
-            .query(&[("alt", "json")])
-            .headers(base_headers())
-            .header("Cookie", cookies)
-            // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L164
-            .header("X-Goog-Visitor-Id", visitor_id)
-            // // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L180
-            // .header("X-Goog-Request-Time", Utc::now().timestamp().to_string())
-            .send();
-
-        let resp = match resp {
-            Ok(resp) => resp,
-            Err(err) => {
-                warn!("{err}, retrying in {RETRY_DELAY:?}");
-                thread::sleep(RETRY_DELAY);
-                continue;
-            }
-        };
-
-        if resp.status().is_success() {
-            break Ok(resp);
-        }
-
-        warn!(
-            "got {}, retrying in {RETRY_DELAY:?} ({:?})",
-            resp.status(),
-            resp.text()
-        );
-        thread::sleep(RETRY_DELAY);
-    }
+    Ok(resp)
 }
 
 // https://github.com/sigma67/ytmusicapi/blob/21445ca6f3bff83fc4f4f4546fc316710f517731/ytmusicapi/mixins/search.py#L146
@@ -118,7 +92,7 @@ impl SearchFilter {
     /// Get the filter param for `self`
     ///
     /// <https://github.com/sigma67/ytmusicapi/blob/21445ca6f3bff83fc4f4f4546fc316710f517731/ytmusicapi/parsers/search.py#L283>
-    fn param(&self) -> &'static str {
+    fn param(self) -> &'static str {
         match self {
             SearchFilter::Albums => "Ig",
             SearchFilter::Playlists => "Io",

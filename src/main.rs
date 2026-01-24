@@ -1,13 +1,13 @@
 use anyhow::Context;
 use clap::{ArgAction, Parser};
 use console::Term;
-use dialoguer::{Input, Password};
+use dialoguer::{Confirm, Input, Password};
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
-use tracing::{Level, error, info, warn};
+use tracing::{Level, debug, info, warn};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use std::process::{Command, exit};
+use std::process::{Command, Stdio, exit};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -75,8 +75,6 @@ fn main() -> anyhow::Result<()> {
     )
     .context("extracting youtube url from spotify")?;
 
-    info!("found {} tracks", urls.len());
-
     let mut ytdlp_args = args.ytdlp_args;
 
     if args.mp3 {
@@ -87,18 +85,34 @@ fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
-    for url in urls {
-        let ytdlp = Command::new("yt-dlp")
-            .arg(url)
-            .args(["-f", "ba"])
-            .args(&ytdlp_args)
-            .status();
+    let mut failed = Vec::new();
+    for (i, url) in urls {
+        ytdlp(url, i + 1, &ytdlp_args, Some(&mut failed));
+    }
 
-        if let Ok(status) = ytdlp
-            && !status.success()
-        {
-            error!("yt-dlp terminated with status code {status}");
-            exit(1);
+    if failed.is_empty() {
+        return Ok(());
+    }
+
+    info!("these urls failed to download: {failed:?}");
+
+    let retry_urls = || {
+        for (i, url) in failed {
+            // we dont +1 to i because we already did in previous call to `ytdlp`, and we are using its output
+            ytdlp(url, i, &ytdlp_args, None);
+        }
+    };
+
+    if args.no_interaction {
+        debug!("retrying because --no-interaction was set");
+        retry_urls();
+    } else {
+        let retry = Confirm::new()
+            .with_prompt("retry urls?")
+            .default(true)
+            .interact();
+        if retry.is_ok_and(|r| r) {
+            retry_urls();
         }
     }
 
@@ -109,6 +123,45 @@ fn handle_exit() {
     let term = Term::stdout();
     if let Err(err) = term.show_cursor() {
         warn!("failed to show cursor: {err}");
+    }
+}
+
+#[inline]
+fn ytdlp(
+    url: String,
+    track_num: usize,
+    args: &[String],
+    failed: Option<&mut Vec<(usize, String)>>,
+) {
+    // yt-dlp output template
+    let template = format!("{track_num}. %(title)s [%(id)s].%(ext)s");
+    let ytdlp = Command::new("yt-dlp")
+        .arg(&url)
+        .args(["-o", &template])
+        .args(["-f", "ba"])
+        .args(args)
+        .stdout(Stdio::inherit())
+        .output();
+
+    if let Ok(output) = ytdlp {
+        let status = output.status;
+
+        if status.success() {
+            return;
+        }
+
+        let stderr = str::from_utf8(&output.stderr);
+
+        if stderr.is_ok_and(|err| err.contains("Interrupted by user")) {
+            warn!("ctrl-c detected");
+            // sigint
+            exit(2);
+        } else {
+            warn!("yt-dlp terminated with {status}");
+            if let Some(failed) = failed {
+                failed.push((track_num, url));
+            }
+        }
     }
 }
 

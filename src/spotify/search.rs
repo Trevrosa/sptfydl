@@ -1,13 +1,13 @@
-use std::borrow::Borrow;
+use std::{borrow::Borrow, fmt::Debug};
 
 use anyhow::anyhow;
 use reqwest::IntoUrl;
 use serde::Deserialize;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::CLIENT;
 
-/// Parse the track id from `url` and get a list of [`SpotifyTrack`]s, and the name (if playlist or album)
+/// Parse the spotify id from `url` and get a list of [`SpotifyTrack`]s and the name (of the playlist or album, if `url` is one.)
 pub fn get_from_url(
     url: impl IntoUrl,
     access_token: impl AsRef<str>,
@@ -39,10 +39,22 @@ pub fn get_from_url(
 /// Only some of the fields.
 ///
 /// <https://developer.spotify.com/documentation/web-api/reference/get-track>
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct SpotifyTrack {
     pub name: String,
+    pub id: String,
     pub artists: Vec<SpotifyArtist>,
+}
+
+impl Debug for SpotifyTrack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = format!("https://open.spotify.com/track/{}", self.id);
+        f.debug_struct("SpotifyTrack")
+            .field("name", &self.name)
+            .field("url", &url)
+            .field("artists", &self.artists)
+            .finish()
+    }
 }
 
 /// I only want the name.
@@ -69,16 +81,7 @@ pub fn find_track(
 
     info!("finding track id `{track_id}`");
 
-    let resp = CLIENT
-        .get(format!("{TRACK_API}/{track_id}"))
-        .bearer_auth(access_token)
-        .send()?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!("got {}: {:?}", resp.status(), resp.text()));
-    }
-
-    let resp = resp.json::<SpotifyTrack>()?;
+    let resp: SpotifyTrack = get_resp(&format!("{TRACK_API}/{track_id}"), access_token)?;
 
     Ok(resp)
 }
@@ -106,16 +109,7 @@ pub fn find_album_tracks(
 
     info!("finding album id `{id}`");
 
-    let resp = CLIENT
-        .get(format!("{ALBUM_API}/{id}"))
-        .bearer_auth(access_token)
-        .send()?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!("got {}: {:?}", resp.status(), resp.text()));
-    }
-
-    let resp = resp.json::<Album>()?;
+    let resp: Album = get_resp(&format!("{ALBUM_API}/{id}"), access_token)?;
 
     let artists = resp.artists.join(", ");
 
@@ -131,6 +125,8 @@ struct Playlist {
 
 #[derive(Deserialize, Debug)]
 struct PlaylistTracks {
+    total: u32,
+    next: Option<String>,
     items: Vec<PlaylistTrack>,
 }
 
@@ -144,6 +140,12 @@ struct PlaylistOwner {
     display_name: Option<String>,
 }
 
+#[derive(Deserialize, Debug)]
+struct PlaylistPagination {
+    next: Option<String>,
+    items: Vec<PlaylistTrack>,
+}
+
 pub fn find_playlist_tracks(
     id: impl AsRef<str>,
     access_token: impl AsRef<str>,
@@ -155,25 +157,34 @@ pub fn find_playlist_tracks(
 
     info!("finding playlist id `{id}`");
 
-    let resp = CLIENT
-        .get(format!("{PLAYLIST_API}/{id}"))
-        .bearer_auth(access_token)
-        .send()?;
+    let resp: Playlist = get_resp(&format!("{PLAYLIST_API}/{id}"), access_token)?;
+
+    let mut tracks = Vec::with_capacity(resp.tracks.total as usize);
+
+    tracks.extend(resp.tracks.items.into_iter().filter_map(|p| p.track));
+
+    // if `next_page` is set, we need to go to next pagination
+    let mut next_page = resp.tracks.next;
+    while let Some(cur_page) = next_page {
+        debug!("getting next page of results");
+
+        let cur_page: PlaylistPagination = get_resp(&cur_page, access_token)?;
+        debug!("got {} tracks", cur_page.items.len());
+        tracks.extend(cur_page.items.into_iter().filter_map(|p| p.track));
+        next_page = cur_page.next;
+    }
+
+    let owner = resp.owner.display_name.as_deref().unwrap_or("NO OWNER");
+
+    Ok((tracks, format!("{} - {owner}", resp.name)))
+}
+
+fn get_resp<T: for<'a> Deserialize<'a>>(url: &str, access_token: &str) -> anyhow::Result<T> {
+    let resp = CLIENT.get(url).bearer_auth(access_token).send()?;
 
     if !resp.status().is_success() {
         return Err(anyhow!("got {}: {:?}", resp.status(), resp.text()));
     }
 
-    let resp = resp.json::<Playlist>()?;
-
-    let tracks = resp
-        .tracks
-        .items
-        .into_iter()
-        .filter_map(|p| p.track)
-        .collect();
-
-    let owner = resp.owner.display_name.as_deref().unwrap_or("NO OWNER");
-
-    Ok((tracks, format!("{} - {owner}", resp.name)))
+    Ok(resp.json::<T>()?)
 }
