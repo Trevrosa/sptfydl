@@ -32,6 +32,8 @@ struct Args {
     ytdlp_args: Vec<String>,
 }
 
+const RETRY_LIMIT: u32 = 6;
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -92,10 +94,15 @@ fn main() -> anyhow::Result<()> {
         ytdlp(url, i + 1, single, &ytdlp_args, Some(&mut failed));
     }
 
+    let mut tries = 0;
     while !failed.is_empty() {
+        tries += 1;
+
         info!("these urls failed to download: {failed:?}");
 
-        let mut new_failed = Vec::with_capacity(failed.len());
+        let len = failed.len();
+
+        let mut new_failed = Vec::with_capacity(len);
 
         let retry_urls = || {
             for (i, url) in failed {
@@ -117,6 +124,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        if new_failed.len() == len && tries == RETRY_LIMIT {
+            warn!("failed urls not succeeding after {RETRY_LIMIT} tries");
+        }
+
         failed = new_failed;
     }
 
@@ -129,7 +140,7 @@ fn main() -> anyhow::Result<()> {
 
     if extraction.failures > 0 {
         warn!(
-            "{} songs failed, check report named `failed-...txt`",
+            "{} songs failed to search, check report named `failed-...txt`",
             extraction.failures
         );
     }
@@ -177,8 +188,7 @@ fn ytdlp<'a>(
 
         if stderr.is_ok_and(|err| err.contains("Interrupted by user")) {
             warn!("ctrl-c detected");
-            // sigint
-            exit(2);
+            exit(1);
         } else {
             warn!("yt-dlp terminated with {status}");
             if let Some(failed) = failed {
