@@ -12,10 +12,14 @@ categories = ["command-line-utilities"]
 anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "process"] }
+async-channel = "2.5.0"
+indicatif = "0.18.3"
+tracing-indicatif = "0.3.14"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
 
-reqwest = { version = "0.13.1", features = ["blocking", "form", "query", "json", "gzip"] }
+reqwest = { version = "0.13.1", features = ["form", "query", "json", "gzip"] }
 regex = { version = "1.12.2", features = ["perf", "std", "unicode-perl"], default-features = false }
 sha1 = { version = "0.10.6" }
 base64 = "0.22.1"

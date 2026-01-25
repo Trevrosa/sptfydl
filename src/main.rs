@@ -4,10 +4,15 @@ use console::Term;
 use dialoguer::{Confirm, Input, Password};
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
-use tracing::{Level, debug, info, warn};
+use tokio::process::Command;
+use tracing::{Instrument, Level, debug, info, info_span, warn};
+use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use std::process::{Command, Stdio, exit};
+use std::{
+    process::{Stdio, exit},
+    sync::Arc,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -27,14 +32,21 @@ struct Args {
     #[arg(short, long)]
     no_interaction: bool,
 
+    #[arg(long, default_value_t = 5)]
+    downloaders: usize,
+
+    #[arg(long, default_value_t = 3)]
+    searchers: usize,
+
     /// Additional args for yt-dlp.
     #[arg(last = true)]
     ytdlp_args: Vec<String>,
 }
 
-const RETRY_LIMIT: u32 = 6;
+const RETRY_LIMIT: usize = 5;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let filter = match args.verbose {
@@ -43,9 +55,17 @@ fn main() -> anyhow::Result<()> {
         2..=u8::MAX => Level::TRACE,
     };
 
+    let indicatif_layer = IndicatifLayer::new();
+
     tracing_subscriber::registry()
-        .with(fmt::layer().without_time().compact())
+        .with(
+            fmt::layer()
+                .without_time()
+                .compact()
+                .with_writer(indicatif_layer.get_stderr_writer()),
+        )
         .with(Targets::new().with_target("sptfydl", filter))
+        .with(indicatif_layer)
         .init();
 
     ctrlc::set_handler(handle_exit)?;
@@ -75,6 +95,7 @@ fn main() -> anyhow::Result<()> {
         &args.url,
         args.no_interaction,
     )
+    .await
     .context("extracting youtube url from spotify")?;
 
     let mut ytdlp_args = args.ytdlp_args;
@@ -87,52 +108,63 @@ fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
-    let single = extraction.urls.len() == 1;
+    let ytdlp_args = Arc::new(ytdlp_args);
 
-    let mut failed = Vec::new();
-    for (i, url) in &extraction.urls {
-        ytdlp(url, i + 1, single, &ytdlp_args, Some(&mut failed));
-    }
+    let urls_len = extraction.urls.len();
+    let single = urls_len == 1;
 
-    // gets reset to 0 on success!
-    let mut tries = 0;
-    while !failed.is_empty() {
-        tries += 1;
+    let (urls_tx, urls_rx) = async_channel::bounded(args.downloaders);
 
-        info!("these urls failed to download: {failed:?}");
+    let urls = extraction.urls.clone();
+    tokio::spawn(async move {
+        for url in urls {
+            urls_tx.send(url).await.expect("channel should be open");
+        }
+    });
 
-        let len = failed.len();
+    let (failed_tx, failed_rx) = async_channel::bounded(urls_len);
 
-        let mut new_failed = Vec::with_capacity(len);
+    info!("downloading with {} downloaders", args.downloaders);
 
-        let retry_urls = || {
-            for (i, url) in failed {
-                // we dont +1 to i because we already did in previous call to `ytdlp`, and we are using its output
-                if ytdlp(url, i, single, &ytdlp_args, Some(&mut new_failed)) {
-                    tries = 0;
+    let mut downloaders = Vec::with_capacity(args.downloaders);
+    for task in 0..args.downloaders {
+        let failed_tx = failed_tx.clone();
+        let failed_rx = failed_rx.clone();
+        let urls_rx = urls_rx.clone();
+        let args = ytdlp_args.clone();
+
+        let handle = tokio::spawn(
+            async move {
+                loop {
+                    debug!("waiting for url");
+                    let result = match urls_rx.recv().await {
+                        Ok((i, url)) => Ok((0, i + 1, url)),
+                        Err(_) => failed_rx.try_recv(),
+                    };
+
+                    let Ok((try_num, i, url)) = result else {
+                        debug!("no more urls");
+                        return;
+                    };
+
+                    if try_num > RETRY_LIMIT + 1 {
+                        warn!("track {i}: {url} reached retry limit");
+                        continue;
+                    }
+
+                    info!("track {i}: {url}");
+                    ytdlp(url, i, single, &args, try_num, &failed_tx).await;
                 }
             }
+            .instrument(info_span!("downloader", id = task + 1)),
+        );
+        downloaders.push(handle);
+    }
+
+    for handle in downloaders {
+        if let Err(err) = handle.await {
+            warn!("a downloader failed: {err}");
         };
-
-        if args.no_interaction {
-            debug!("retrying because --no-interaction was set");
-            retry_urls();
-        } else {
-            let retry = Confirm::new()
-                .with_prompt("retry urls?")
-                .default(true)
-                .interact();
-            if retry.is_ok_and(|r| r) {
-                retry_urls();
-            }
-        }
-
-        if tries == RETRY_LIMIT && new_failed.len() == len {
-            warn!("failed urls not succeeding after {RETRY_LIMIT} tries, stopping");
-            break;
-        }
-
-        failed = new_failed;
     }
 
     if !extraction.warnings.is_empty() {
@@ -162,26 +194,23 @@ fn handle_exit() {
 
 /// returns `true` on success
 #[inline]
-fn ytdlp<'a>(
-    url: &'a str,
+async fn ytdlp(
+    url: String,
     track_num: usize,
     single: bool,
     args: &[String],
-    failed: Option<&mut Vec<(usize, &'a str)>>,
+    try_num: usize,
+    failed: &async_channel::Sender<(usize, usize, String)>,
 ) -> bool {
     let mut ytdlp = Command::new("yt-dlp");
 
-    ytdlp.arg(url);
+    ytdlp.arg(&url);
     if !single {
         // yt-dlp output template
         ytdlp.args(["-o", &format!("{track_num}. %(title)s [%(id)s].%(ext)s")]);
     };
 
-    let ytdlp = ytdlp
-        .args(["-f", "ba"])
-        .args(args)
-        .stdout(Stdio::inherit())
-        .output();
+    let ytdlp = ytdlp.args(["-f", "ba"]).args(args).output().await;
 
     if let Ok(output) = ytdlp {
         let status = output.status;
@@ -194,12 +223,13 @@ fn ytdlp<'a>(
 
         if stderr.is_ok_and(|err| err.contains("Interrupted by user")) {
             warn!("ctrl-c detected");
-            exit(1);
+            handle_exit();
         } else {
             warn!("yt-dlp terminated with {status}");
-            if let Some(failed) = failed {
-                failed.push((track_num, url));
-            }
+            failed
+                .send((try_num + 1, track_num, url))
+                .await
+                .expect("channel should be open");
         }
     }
 

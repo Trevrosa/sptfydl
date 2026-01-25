@@ -1,4 +1,4 @@
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs, io,

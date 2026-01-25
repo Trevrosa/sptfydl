@@ -57,7 +57,7 @@ impl Extraction {
 /// # Panics
 ///
 /// This function panics if we could not get the cookies from `stdin`.
-pub fn extract_spotify(
+pub async fn extract_spotify(
     id: &str,
     secret: &str,
     spotify_url: &str,
@@ -69,16 +69,16 @@ pub fn extract_spotify(
         debug!("got spotify token from cache");
         token
     } else {
-        request_token_and_save(id, secret)?
+        request_token_and_save(id, secret).await?
     };
 
     let token = if token.expired() {
-        request_token_and_save(id, secret)?
+        request_token_and_save(id, secret).await?
     } else {
         token
     };
 
-    let (spotify_tracks, name) = get_from_url(spotify_url, token)?;
+    let (spotify_tracks, name) = get_from_url(spotify_url, token).await?;
 
     info!("got {} tracks", spotify_tracks.len());
 
@@ -87,7 +87,7 @@ pub fn extract_spotify(
     let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
     let auth = Browser::new(cookie);
 
-    let (urls, warnings, failed) = get_youtube(&spotify_tracks, &auth, no_interaction);
+    let (urls, warnings, failed) = get_youtube(&spotify_tracks, &auth, no_interaction).await;
 
     if !failed.is_empty() {
         if !no_interaction {
@@ -121,7 +121,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(5);
 
 const MAX_RETRIES: usize = 3;
 
-fn get_youtube<'a>(
+async fn get_youtube<'a>(
     spotify_tracks: &'a [SpotifyTrack],
     auth: &Browser,
     no_interaction: bool,
@@ -157,7 +157,7 @@ fn get_youtube<'a>(
                 continue 'tracks;
             }
 
-            let searched = ytmusic::search(query.as_str(), None, auth.as_ref());
+            let searched = ytmusic::search(query.as_str(), None, auth.as_ref()).await;
 
             let searched = match searched {
                 Ok(resp) => resp,
@@ -172,7 +172,7 @@ fn get_youtube<'a>(
                 warn!(
                     "ytm api search endpoint failed with {}: {:?}",
                     searched.status(),
-                    searched.text()
+                    searched.text().await
                 );
 
                 warn!("retrying in {RETRY_DELAY:?}");
@@ -180,7 +180,7 @@ fn get_youtube<'a>(
                 continue;
             }
 
-            let Ok(results) = searched.json() else {
+            let Ok(results) = searched.json().await else {
                 warn!("couldnt deserialize response as json, retrying in {RETRY_DELAY:?}");
                 thread::sleep(RETRY_DELAY);
                 continue;
@@ -271,9 +271,9 @@ fn get_cookies(no_interaction: bool) -> anyhow::Result<String> {
 ///
 /// This function fails if we could not get a new [`AccessToken`].
 #[inline]
-pub fn request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {
+pub async fn request_token_and_save(id: &str, secret: &str) -> anyhow::Result<AccessToken> {
     debug!("requesting new spotify access token");
-    let Some(access_token) = AccessToken::get(id, secret) else {
+    let Some(access_token) = AccessToken::get(id, secret).await else {
         return Err(anyhow!("could not get access token"));
     };
 
