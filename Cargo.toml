@@ -2,7 +2,11 @@
 name = "sptfydl"
 version = "0.1.5"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/Trevrosa/sptfydl"
 description = "a tool to download spotify links"
+keywords = ["spotify", "download", "songs"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.100"
