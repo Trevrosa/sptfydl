@@ -4,17 +4,20 @@ pub use access_token::AccessToken;
 pub mod search;
 use anyhow::anyhow;
 use dialoguer::Select;
+use indicatif::ProgressStyle;
 pub use search::get_from_url;
+use tokio::{sync::mpsc, time::sleep};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use std::{
     fmt::Write as FmtWrite,
     fs,
     io::{Write, stdin, stdout},
-    thread,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use tracing::{debug, info, warn};
+use tracing::{Instrument, Span, debug, info, info_span, warn};
 
 use crate::{
     load, load_str, save, save_str,
@@ -61,7 +64,9 @@ pub async fn extract_spotify(
     id: &str,
     secret: &str,
     spotify_url: &str,
+    searchers: usize,
     no_interaction: bool,
+    retries: usize,
 ) -> anyhow::Result<Extraction> {
     let token = load::<AccessToken>(SPOTIFY_TOKEN_CONFIG_NAME);
 
@@ -79,6 +84,7 @@ pub async fn extract_spotify(
     };
 
     let (spotify_tracks, name) = get_from_url(spotify_url, token).await?;
+    let first_name = spotify_tracks[0].name.clone();
 
     info!("got {} tracks", spotify_tracks.len());
 
@@ -87,7 +93,14 @@ pub async fn extract_spotify(
     let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
     let auth = Browser::new(cookie);
 
-    let (urls, warnings, failed) = get_youtube(&spotify_tracks, &auth, no_interaction).await;
+    let (urls, warnings, failed) = get_youtube(
+        spotify_tracks,
+        Arc::from(auth.inner()),
+        searchers,
+        no_interaction,
+        retries,
+    )
+    .await;
 
     if !failed.is_empty() {
         if !no_interaction {
@@ -99,7 +112,7 @@ pub async fn extract_spotify(
             report
         });
 
-        let name = name.as_deref().unwrap_or(&spotify_tracks[0].name);
+        let name = name.as_deref().unwrap_or(&first_name);
         let path = format!("failed-{name}.txt");
 
         let _ = fs::write(path, report);
@@ -119,116 +132,175 @@ pub async fn extract_spotify(
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
-const MAX_RETRIES: usize = 3;
-
-async fn get_youtube<'a>(
-    spotify_tracks: &'a [SpotifyTrack],
-    auth: &Browser,
+/// search ytmusic for the `spotify_tracks`
+///
+/// # Panics
+///
+/// Will panic if any internal `Arc` or `Mutex` poisons, or any internal `channel` closes prematurely.
+async fn get_youtube(
+    spotify_tracks: Vec<SpotifyTrack>,
+    auth: Arc<str>,
+    searchers: usize,
     no_interaction: bool,
-) -> (
-    Vec<(usize, String)>,
-    Vec<usize>,
-    Vec<(usize, &'a SpotifyTrack)>,
-) {
-    let mut urls = Vec::with_capacity(spotify_tracks.len());
+    retries: usize,
+) -> (Vec<(usize, String)>, Vec<usize>, Vec<(usize, SpotifyTrack)>) {
+    // fails should be uncommon
+    let failed = Arc::new(Mutex::new(Vec::new()));
+    let (warns_tx, mut warns_rx) = mpsc::channel(spotify_tracks.len());
 
-    let mut warnings = Vec::new();
-    let mut failed = Vec::new();
+    let (tracks_tx, tracks_rx) = async_channel::bounded(searchers);
+    let (urls_tx, mut urls_rx) = mpsc::channel(spotify_tracks.len());
 
-    'tracks: for (i, spotify_track) in spotify_tracks.iter().enumerate() {
-        debug!("metadata: {spotify_track:#?}");
-        let spotify_artists: Vec<&str> = spotify_track
-            .artists
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect();
+    let expected_tracks = spotify_tracks.len();
 
-        info!("finding track {}: {}", i + 1, spotify_track.name);
+    tokio::spawn(async move {
+        for track in spotify_tracks.into_iter().enumerate() {
+            tracks_tx.send(track).await.expect("channel should be open");
+        }
+    });
 
-        let query = format!("{} {}", spotify_track.name, spotify_artists.join(" "));
+    let pb_span = info_span!("header");
 
-        let mut tries = 0;
-        let mut results = loop {
-            tries += 1;
+    pb_span.pb_set_style(
+        &ProgressStyle::with_template("{wide_bar} {pos}/{len}").expect("valid template"),
+    );
+    pb_span.pb_set_length(expected_tracks as u64);
+    pb_span.pb_start();
 
-            if tries > MAX_RETRIES {
-                failed.push((i + 1, spotify_track));
-                warn!("reached max retries, skipping");
-                continue 'tracks;
-            }
+    let mut searcher_handles = Vec::with_capacity(searchers);
+    for task in 0..searchers {
+        let urls = urls_tx.clone();
+        let tracks = tracks_rx.clone();
+        let warns = warns_tx.clone();
+        let failed = failed.clone();
+        let auth = auth.clone();
 
-            let searched = ytmusic::search(query.as_str(), None, auth.as_ref()).await;
+        let handle = tokio::spawn(async move {
+            'tracks: loop {
+                debug!("waiting for tracks");
 
-            let searched = match searched {
-                Ok(resp) => resp,
-                Err(err) => {
-                    warn!("{err}, retrying in {RETRY_DELAY:?}");
-                    thread::sleep(RETRY_DELAY);
-                    continue;
+                let Ok((i, track)) = tracks.recv().await else {
+                    debug!("no more tracks");
+                    return;
+                };
+
+                debug!("metadata: {track:#?}");
+                info!("track {}: {}", i + 1, track.name);
+
+                let artists: Vec<&str> = track.artists.iter().map(|a| a.name.as_str()).collect();
+                let query = format!("{} {}", track.name, artists.join(" "));
+
+                let mut tries = 0;
+                let mut results = loop {
+                    tries += 1;
+
+                    if tries > retries {
+                        failed
+                            .lock()
+                            .expect("shouldnt be poisoned")
+                            .push((i + 1, track));
+                        continue 'tracks;
+                    }
+
+                    let searched = match ytmusic::search(query.as_str(), None, &auth).await {
+                        Ok(resp) => resp,
+                        Err(err) => {
+                            warn!("{err}, retrying in {RETRY_DELAY:?}");
+                            sleep(RETRY_DELAY).await;
+                            continue;
+                        }
+                    };
+
+                    if !searched.status().is_success() {
+                        warn!(
+                            "ytm api search endpoint failed with {}: {:?}",
+                            searched.status(),
+                            searched.text().await
+                        );
+
+                        warn!("retrying in {RETRY_DELAY:?}");
+                        sleep(RETRY_DELAY).await;
+                        continue;
+                    }
+
+                    let Ok(results) = searched.json().await else {
+                        warn!("couldnt deserialize response as json, retrying in {RETRY_DELAY:?}");
+                        sleep(RETRY_DELAY).await;
+                        continue;
+                    };
+
+                    let Some(results) = ytmusic::parse_results(&results) else {
+                        warn!("couldnt parse search results, retrying in {RETRY_DELAY:?}");
+                        sleep(RETRY_DELAY).await;
+                        continue;
+                    };
+
+                    if results.is_empty() {
+                        warn!("search results was empty, retrying in {RETRY_DELAY:?}");
+                        sleep(RETRY_DELAY).await;
+                        continue;
+                    }
+
+                    break results;
+                };
+
+                results[0].title.push_str("Best Result");
+
+                debug!("got {} results", results.len());
+
+                let choice = if no_interaction {
+                    let choice = results.iter().position(|r| r.video_id.is_some());
+                    debug!("default choice was {choice:?}");
+                    choice
+                } else {
+                    Select::new()
+                        .with_prompt("Choose link to download")
+                        .default(0)
+                        .items(&results)
+                        .interact()
+                        .ok()
                 }
-            };
+                .unwrap_or(0);
 
-            if !searched.status().is_success() {
-                warn!(
-                    "ytm api search endpoint failed with {}: {:?}",
-                    searched.status(),
-                    searched.text().await
-                );
+                if no_interaction && choice != 0 {
+                    warn!("the best result was not available and --no-interaction was set.");
+                    warns.send(i).await.expect("shouldnt be closed");
+                }
 
-                warn!("retrying in {RETRY_DELAY:?}");
-                thread::sleep(RETRY_DELAY);
-                continue;
+                let url = results[choice].link_or_default().to_string();
+
+                Span::current().pb_inc(1);
+                urls.send((i, url)).await.expect("shouldnt be closed");
             }
-
-            let Ok(results) = searched.json().await else {
-                warn!("couldnt deserialize response as json, retrying in {RETRY_DELAY:?}");
-                thread::sleep(RETRY_DELAY);
-                continue;
-            };
-
-            let Some(results) = ytmusic::parse_results(&results) else {
-                warn!("couldnt parse search results, retrying in {RETRY_DELAY:?}");
-                thread::sleep(RETRY_DELAY);
-                continue;
-            };
-
-            if results.is_empty() {
-                warn!("search results was empty, retrying in {RETRY_DELAY:?}");
-                thread::sleep(RETRY_DELAY);
-                continue;
-            }
-
-            break results;
-        };
-
-        results[0].title.push_str("Best Result");
-
-        debug!("got {} results", results.len());
-
-        let choice = if no_interaction {
-            let choice = results.iter().position(|r| r.video_id.is_some());
-            debug!("default choice was {choice:?}");
-            choice
-        } else {
-            Select::new()
-                .with_prompt("Choose link to download")
-                .default(0)
-                .items(&results)
-                .interact()
-                .ok()
-        }
-        .unwrap_or(0);
-
-        if no_interaction && choice != 0 {
-            warn!("the best result was not available and --no-interaction was set.");
-            warnings.push(i);
-        }
-
-        let url = results[choice].link_or_default().to_string();
-
-        urls.push((i, url));
+        })
+        .instrument(info_span!("searcher"));
+        searcher_handles.push(handle);
     }
 
+    // FIXME: doesnt end
+    let mut urls = Vec::with_capacity(expected_tracks);
+    async {
+        while let Some(url) = urls_rx.recv().await {
+            Span::current().pb_inc(1);
+            urls.push(url);
+        }
+    }
+    .instrument(pb_span)
+    .await;
+
+    for handle in searcher_handles {
+        if let Err(err) = handle.await {
+            warn!("a downloader failed: {err}");
+        };
+    }
+
+    let mut warnings = Vec::new();
+    warns_rx.recv_many(&mut warnings, expected_tracks).await;
+
+    let failed = Arc::into_inner(failed)
+        .expect("should not be poisoned")
+        .into_inner()
+        .expect("should not be poisoned");
     (urls, warnings, failed)
 }
 

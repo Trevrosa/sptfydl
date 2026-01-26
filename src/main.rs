@@ -1,18 +1,16 @@
 use anyhow::Context;
 use clap::{ArgAction, Parser};
 use console::Term;
-use dialoguer::{Confirm, Input, Password};
+use dialoguer::{Input, Password};
+use indicatif::ProgressStyle;
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
 use tokio::process::Command;
-use tracing::{Instrument, Level, debug, info, info_span, warn};
-use tracing_indicatif::IndicatifLayer;
+use tracing::{Instrument, Level, Span, debug, info, info_span, warn};
+use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use std::{
-    process::{Stdio, exit},
-    sync::Arc,
-};
+use std::{process::exit, sync::Arc};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -32,18 +30,22 @@ struct Args {
     #[arg(short, long)]
     no_interaction: bool,
 
-    #[arg(long, default_value_t = 5)]
+    /// The number of concurrent downloads.
+    #[arg(short, long, default_value_t = 5)]
     downloaders: usize,
 
-    #[arg(long, default_value_t = 3)]
+    /// The number of concurrent searches.
+    #[arg(short, long, default_value_t = 3)]
     searchers: usize,
+
+    /// The number of retries allowed for searches and downloads.
+    #[arg(short, long, default_value_t = 5)]
+    retries: usize,
 
     /// Additional args for yt-dlp.
     #[arg(last = true)]
     ytdlp_args: Vec<String>,
 }
-
-const RETRY_LIMIT: usize = 5;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -70,30 +72,15 @@ async fn main() -> anyhow::Result<()> {
 
     ctrlc::set_handler(handle_exit)?;
 
-    let oauth: SpotifyOauth = if let Ok(oauth) = load(SPOTIFY_CONFIG_NAME) {
-        oauth
-    } else {
-        let client_id = Input::new()
-            .with_prompt("spotify client_id?")
-            .interact_text()?;
-        let client_secret = Password::new()
-            .with_prompt("spotify client_secret?")
-            .interact()?;
-
-        let oauth = SpotifyOauth {
-            client_id,
-            client_secret,
-        };
-        save(&oauth, SPOTIFY_CONFIG_NAME)?;
-
-        oauth
-    };
+    let oauth = get_spotify_oauth()?;
 
     let extraction = extract_spotify(
         &oauth.client_id,
         &oauth.client_secret,
         &args.url,
+        args.searchers,
         args.no_interaction,
+        args.retries,
     )
     .await
     .context("extracting youtube url from spotify")?;
@@ -108,64 +95,13 @@ async fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
-    let ytdlp_args = Arc::new(ytdlp_args);
-
-    let urls_len = extraction.urls.len();
-    let single = urls_len == 1;
-
-    let (urls_tx, urls_rx) = async_channel::bounded(args.downloaders);
-
-    let urls = extraction.urls.clone();
-    tokio::spawn(async move {
-        for url in urls {
-            urls_tx.send(url).await.expect("channel should be open");
-        }
-    });
-
-    let (failed_tx, failed_rx) = async_channel::bounded(urls_len);
-
-    info!("downloading with {} downloaders", args.downloaders);
-
-    let mut downloaders = Vec::with_capacity(args.downloaders);
-    for task in 0..args.downloaders {
-        let failed_tx = failed_tx.clone();
-        let failed_rx = failed_rx.clone();
-        let urls_rx = urls_rx.clone();
-        let args = ytdlp_args.clone();
-
-        let handle = tokio::spawn(
-            async move {
-                loop {
-                    debug!("waiting for url");
-                    let result = match urls_rx.recv().await {
-                        Ok((i, url)) => Ok((0, i + 1, url)),
-                        Err(_) => failed_rx.try_recv(),
-                    };
-
-                    let Ok((try_num, i, url)) = result else {
-                        debug!("no more urls");
-                        return;
-                    };
-
-                    if try_num > RETRY_LIMIT + 1 {
-                        warn!("track {i}: {url} reached retry limit");
-                        continue;
-                    }
-
-                    info!("track {i}: {url}");
-                    ytdlp(url, i, single, &args, try_num, &failed_tx).await;
-                }
-            }
-            .instrument(info_span!("downloader", id = task + 1)),
-        );
-        downloaders.push(handle);
-    }
-
-    for handle in downloaders {
-        if let Err(err) = handle.await {
-            warn!("a downloader failed: {err}");
-        };
-    }
+    download_many(
+        extraction.urls.clone(),
+        Arc::from(ytdlp_args),
+        args.downloaders,
+        args.retries,
+    )
+    .await;
 
     if !extraction.warnings.is_empty() {
         warn!(
@@ -184,12 +120,90 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_exit() {
-    let term = Term::stdout();
-    if let Err(err) = term.show_cursor() {
-        warn!("failed to show cursor: {err}");
+async fn download_many(
+    urls: Vec<(usize, String)>,
+    args: Arc<[String]>,
+    downloaders: usize,
+    retries: usize,
+) {
+    let urls_len = urls.len();
+    let single = urls_len == 1;
+
+    let (urls_tx, urls_rx) = async_channel::bounded(downloaders);
+    // we dont want this channel to block on `send`s
+    let (failed_tx, failed_rx) = async_channel::bounded(urls_len);
+
+    tokio::spawn(async move {
+        for url in urls {
+            urls_tx.send(url).await.expect("channel should be open");
+        }
+    });
+
+    let retry_limit = retries;
+
+    let header_span = info_span!("header");
+
+    let mut template = format!("downloading tracks with {} downloaders", downloaders);
+    template.push_str("{wide_msg} {elapsed}\n{wide_bar}");
+    header_span.pb_set_style(
+        &ProgressStyle::with_template(&template)
+            .expect("valid template")
+            .progress_chars("---"),
+    );
+    header_span.pb_start();
+    header_span.pb_set_length(1);
+    header_span.pb_set_position(1);
+
+    let mut downloader_handles = Vec::with_capacity(downloaders);
+    for task in 0..downloaders {
+        let failed_tx = failed_tx.clone();
+        let failed_rx = failed_rx.clone();
+        let urls = urls_rx.clone();
+        let args = args.clone();
+
+        let handle = tokio::spawn(
+            async move {
+                loop {
+                    debug!("waiting for url");
+
+                    // the `urls` channel will be dropped once all urls are sent,
+                    // meaning that eventually `recv()` will return an error,
+                    // letting the task end.
+                    //
+                    // each task has its own `failed` channel sender, meaning the channel
+                    // will not close until all tasks end. this is why `try_recv()` is used;
+                    // it ensures that the task will end instead of waiting forever.
+                    let result = match urls.recv().await {
+                        Ok((i, url)) => Ok((0, i + 1, url)),
+                        Err(_) => failed_rx.try_recv(),
+                    };
+
+                    let Ok((try_num, track_num, url)) = result else {
+                        debug!("no more urls");
+                        return;
+                    };
+                    
+                    Span::current().record("try", try_num);
+
+                    if try_num > retry_limit + 1 {
+                        warn!("track {track_num}: {url} reached retry limit");
+                        continue;
+                    }
+
+                    info!("track {track_num}: {url}");
+                    ytdlp(url, track_num, single, &args, try_num, &failed_tx).await;
+                }
+            }
+            .instrument(info_span!("downloader", id = task + 1)),
+        );
+        downloader_handles.push(handle);
     }
-    exit(1);
+
+    for handle in downloader_handles {
+        if let Err(err) = handle.await {
+            warn!("a downloader failed: {err}");
+        }
+    }
 }
 
 /// returns `true` on success
@@ -200,6 +214,7 @@ async fn ytdlp(
     single: bool,
     args: &[String],
     try_num: usize,
+    // (try_num, track_num, url)
     failed: &async_channel::Sender<(usize, usize, String)>,
 ) -> bool {
     let mut ytdlp = Command::new("yt-dlp");
@@ -208,7 +223,7 @@ async fn ytdlp(
     if !single {
         // yt-dlp output template
         ytdlp.args(["-o", &format!("{track_num}. %(title)s [%(id)s].%(ext)s")]);
-    };
+    }
 
     let ytdlp = ytdlp.args(["-f", "ba"]).args(args).output().await;
 
@@ -234,6 +249,36 @@ async fn ytdlp(
     }
 
     false
+}
+
+fn handle_exit() {
+    let term = Term::stdout();
+    if let Err(err) = term.show_cursor() {
+        warn!("failed to show cursor: {err}");
+    }
+    exit(1);
+}
+
+#[inline]
+fn get_spotify_oauth() -> anyhow::Result<SpotifyOauth> {
+    if let Ok(oauth) = load(SPOTIFY_CONFIG_NAME) {
+        Ok(oauth)
+    } else {
+        let client_id = Input::new()
+            .with_prompt("spotify client_id?")
+            .interact_text()?;
+        let client_secret = Password::new()
+            .with_prompt("spotify client_secret?")
+            .interact()?;
+
+        let oauth = SpotifyOauth {
+            client_id,
+            client_secret,
+        };
+        save(&oauth, SPOTIFY_CONFIG_NAME)?;
+
+        Ok(oauth)
+    }
 }
 
 const SPOTIFY_CONFIG_NAME: &str = "spotify_oauth.yaml";

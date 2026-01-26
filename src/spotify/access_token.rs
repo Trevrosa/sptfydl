@@ -51,7 +51,10 @@ impl AccessToken {
         if !resp.status().is_success() {
             error!(
                 "failed to request access token: `{}`",
-                resp.text().await.as_deref().unwrap_or("failed to read body")
+                resp.text()
+                    .await
+                    .as_deref()
+                    .unwrap_or("failed to read body")
             );
             return None;
         }
