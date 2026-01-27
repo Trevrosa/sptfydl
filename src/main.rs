@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         args.retries,
     )
     .await
-    .context("extracting youtube url from spotify")?;
+    .context("extracting youtube urls from spotify")?;
 
     let mut ytdlp_args = args.ytdlp_args;
 
@@ -95,13 +95,20 @@ async fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
-    download_many(
-        extraction.urls.clone(),
-        Arc::from(ytdlp_args),
-        args.downloaders,
-        args.retries,
-    )
-    .await;
+    if extraction.urls.len() == 1 {
+        let url = extraction.urls[0].1.clone();
+        info!("downloading {url}");
+        ytdlp(url, 1, &ytdlp_args, 0, None).await;
+    } else {
+        download_many(
+            extraction.urls.clone(),
+            Arc::from(ytdlp_args),
+            args.downloaders,
+            args.retries,
+        )
+        .await;
+    }
+
 
     if !extraction.warnings.is_empty() {
         warn!(
@@ -127,7 +134,6 @@ async fn download_many(
     retries: usize,
 ) {
     let urls_len = urls.len();
-    let single = urls_len == 1;
 
     let (urls_tx, urls_rx) = async_channel::bounded(downloaders);
     // we dont want this channel to block on `send`s
@@ -182,7 +188,7 @@ async fn download_many(
                         debug!("no more urls");
                         return;
                     };
-                    
+
                     Span::current().record("try", try_num);
 
                     if try_num > retry_limit + 1 {
@@ -191,7 +197,7 @@ async fn download_many(
                     }
 
                     info!("track {track_num}: {url}");
-                    ytdlp(url, track_num, single, &args, try_num, &failed_tx).await;
+                    ytdlp(url, track_num, &args, try_num, Some(&failed_tx)).await;
                 }
             }
             .instrument(info_span!("downloader", id = task + 1)),
@@ -211,21 +217,19 @@ async fn download_many(
 async fn ytdlp(
     url: String,
     track_num: usize,
-    single: bool,
     args: &[String],
     try_num: usize,
     // (try_num, track_num, url)
-    failed: &async_channel::Sender<(usize, usize, String)>,
+    failed: Option<&async_channel::Sender<(usize, usize, String)>>,
 ) -> bool {
-    let mut ytdlp = Command::new("yt-dlp");
-
-    ytdlp.arg(&url);
-    if !single {
+    let ytdlp = Command::new("yt-dlp")
+        .arg(&url)
         // yt-dlp output template
-        ytdlp.args(["-o", &format!("{track_num}. %(title)s [%(id)s].%(ext)s")]);
-    }
-
-    let ytdlp = ytdlp.args(["-f", "ba"]).args(args).output().await;
+        .args(["-o", &format!("{track_num}. %(title)s [%(id)s].%(ext)s")])
+        .args(["-f", "ba"])
+        .args(args)
+        .output()
+        .await;
 
     if let Ok(output) = ytdlp {
         let status = output.status;
@@ -241,10 +245,12 @@ async fn ytdlp(
             handle_exit();
         } else {
             warn!("yt-dlp terminated with {status}");
-            failed
-                .send((try_num + 1, track_num, url))
-                .await
-                .expect("channel should be open");
+            if let Some(failed) = failed {
+                failed
+                    .send((try_num + 1, track_num, url))
+                    .await
+                    .expect("channel should be open");
+            }
         }
     }
 
