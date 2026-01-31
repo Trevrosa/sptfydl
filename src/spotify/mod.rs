@@ -13,11 +13,11 @@ use std::{
     fmt::Write as FmtWrite,
     fs,
     io::{Write, stdin, stdout},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use tracing::{Instrument, Span, debug, info, info_span, warn};
+use tracing::{Instrument, Span, debug, info, info_span, trace, warn};
 
 use crate::{
     load, load_str, save, save_str,
@@ -102,7 +102,13 @@ pub async fn extract_spotify(
         info!("searching for {}", track.name);
         search_one(track, auth.as_ref(), no_interaction, retries).await
     } else {
-        search_many(spotify_tracks, Arc::from(auth.inner()), searchers, retries).await
+        search_many(
+            spotify_tracks,
+            Arc::from(auth.into_inner()),
+            searchers,
+            retries,
+        )
+        .await
     };
 
     if !failed.is_empty() {
@@ -135,6 +141,7 @@ pub async fn extract_spotify(
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// (`urls`, `warns`, `fails`)
 type SearchResult = (Vec<(usize, String)>, Vec<usize>, Vec<(usize, SpotifyTrack)>);
 
 /// search ytmusic for the `spotify_tracks`
@@ -150,15 +157,14 @@ async fn search_many(
     retries: usize,
 ) -> SearchResult {
     let start = Instant::now();
-    // fails should be uncommon
-    let failed = Arc::new(Mutex::new(Vec::new()));
-    let (warns_tx, mut warns_rx) = mpsc::channel(spotify_tracks.len());
+    let expected_tracks = spotify_tracks.len();
+
+    let (fails_tx, mut failed_rx) = mpsc::channel(expected_tracks);
+    let (warns_tx, mut warns_rx) = mpsc::channel(expected_tracks);
 
     let (tracks_tx, tracks_rx) = async_channel::bounded(searchers);
-    let (urls_tx, mut urls_rx) = mpsc::channel(spotify_tracks.len());
-    info!("setup took {:?}", start.elapsed());
-
-    let expected_tracks = spotify_tracks.len();
+    let (urls_tx, mut urls_rx) = mpsc::channel(expected_tracks);
+    debug!("channel setup took {:?}", start.elapsed());
 
     tokio::spawn(async move {
         for track in spotify_tracks.into_iter().enumerate() {
@@ -166,11 +172,13 @@ async fn search_many(
         }
     });
 
-    let pb_span = info_span!("header");
+    let pb_span = info_span!("pb");
 
     pb_span.pb_set_style(
-        &ProgressStyle::with_template("{wide_bar} {pos}/{len}").expect("valid template"),
+        &ProgressStyle::with_template("{wide_bar} {pos}/{len} ({elapsed})")
+            .expect("valid template"),
     );
+
     pb_span.pb_set_length(expected_tracks as u64);
     pb_span.pb_start();
 
@@ -179,56 +187,64 @@ async fn search_many(
         let urls = urls_tx.clone();
         let tracks = tracks_rx.clone();
         let warns = warns_tx.clone();
-        let failed = failed.clone();
+        let failed = fails_tx.clone();
         let auth = auth.clone();
 
-        let handle = tokio::spawn(async move {
-            loop {
-                debug!("waiting for tracks");
+        let handle = tokio::spawn(
+            async move {
+                loop {
+                    trace!("waiting for tracks");
 
-                let Ok((i, track)) = tracks.recv().await else {
-                    debug!("no more tracks");
-                    return;
-                };
+                    let Ok((i, track)) = tracks.recv().await else {
+                        debug!("no more tracks");
+                        return;
+                    };
 
-                debug!("metadata: {track:#?}");
-                info!("track {}: {}", i + 1, track.name);
+                    debug!("metadata: {track:#?}");
+                    info!("{:?}", track.name);
 
-                let artists: Vec<&str> = track.artists.iter().map(|a| a.name.as_str()).collect();
-                let query = format!("{} {}", track.name, artists.join(" "));
+                    let artists: Vec<&str> =
+                        track.artists.iter().map(|a| a.name.as_str()).collect();
+                    let query = format!("{} {}", track.name, artists.join(" "));
 
-                let Some(mut results) = search_retrying(&query, &auth, retries).await else {
-                    failed
-                        .lock()
-                        .expect("shouldnt be poisoned")
-                        .push((i + 1, track));
-                    continue;
-                };
+                    let Some(mut results) = search_retrying(&query, &auth, retries).await else {
+                        failed
+                            .send((i + 1, track))
+                            .await
+                            .expect("shouldnt be closed");
+                        continue;
+                    };
 
-                results[0].title.push_str("Best Result");
+                    results[0].title.push_str("Best Result");
 
-                debug!("got {} results", results.len());
+                    debug!("got {} results", results.len());
 
-                let choice = {
-                    let choice = results.iter().position(|r| r.video_id.is_some());
-                    debug!("default choice was {choice:?}");
-                    choice.unwrap_or(0)
-                };
+                    let choice = {
+                        let choice = results.iter().position(|r| r.video_id.is_some());
+                        debug!("default choice was {choice:?}");
+                        choice.unwrap_or(0)
+                    };
 
-                if choice != 0 {
-                    warn!("the best result was not available");
-                    warns.send(i).await.expect("shouldnt be closed");
+                    if choice != 0 {
+                        warn!("the best result was not available");
+                        warns.send(i).await.expect("shouldnt be closed");
+                    }
+
+                    let url = results[choice].link_or_default().to_string();
+                    urls.send((i, url)).await.expect("shouldnt be closed");
                 }
-
-                let url = results[choice].link_or_default().to_string();
-                urls.send((i, url)).await.expect("shouldnt be closed");
             }
-        })
-        .instrument(info_span!("searcher", id = task));
+            .instrument(info_span!("searcher", id = task + 1)),
+        );
+
         searcher_handles.push(handle);
     }
 
-    // FIXME: doesnt end
+    // ensure channels close so `recv_many()` doesn't poll forever
+    drop((urls_tx, warns_tx, fails_tx));
+
+    debug!("total setup took {:?}", start.elapsed());
+
     let mut urls = Vec::with_capacity(expected_tracks);
     async {
         while let Some(url) = urls_rx.recv().await {
@@ -242,16 +258,16 @@ async fn search_many(
     for handle in searcher_handles {
         if let Err(err) = handle.await {
             warn!("a downloader failed: {err}");
-        };
+        }
     }
+
+    debug!("collecting fails/warns from channels");
 
     let mut warnings = Vec::new();
     warns_rx.recv_many(&mut warnings, expected_tracks).await;
+    let mut failed = Vec::new();
+    failed_rx.recv_many(&mut failed, expected_tracks).await;
 
-    let failed = Arc::into_inner(failed)
-        .expect("should not be poisoned")
-        .into_inner()
-        .expect("should not be poisoned");
     (urls, warnings, failed)
 }
 
@@ -264,7 +280,7 @@ async fn search_one(
 ) -> SearchResult {
     let artists: Vec<&str> = track.artists.iter().map(|a| a.name.as_str()).collect();
     let query = format!("{} {}", track.name, artists.join(" "));
-    if let Some(mut results) = search_retrying(&query, auth.as_ref(), retries).await {
+    if let Some(mut results) = search_retrying(&query, auth, retries).await {
         results[0].title.push_str("Best Result");
 
         debug!("got {} results", results.len());
@@ -287,7 +303,7 @@ async fn search_one(
         if choice != 0 {
             warn!("the best result was not available");
             warnings.push(0);
-        };
+        }
 
         let url = results[choice].link_or_default().to_string();
         (vec![(0, url)], warnings, vec![])
@@ -299,19 +315,17 @@ async fn search_one(
 /// Search `query` with `auth`, retrying `retries` times. Returns `None` if no results could be found after `retries` retries.
 #[inline]
 async fn search_retrying(query: &str, auth: &str, retries: usize) -> Option<Vec<YtSearchResult>> {
-    let mut tries = 0;
-    loop {
-        tries += 1;
-
-        if tries > retries {
-            break None;
+    for tries in 0..=retries {
+        if tries > 0 {
+            sleep(RETRY_DELAY).await;
         }
 
-        let searched = match ytmusic::search(query, None, &auth).await {
+        let searched = match ytmusic::search(query, None, auth).await {
             Ok(resp) => resp,
             Err(err) => {
-                warn!("{err}, retrying in {RETRY_DELAY:?}");
-                sleep(RETRY_DELAY).await;
+                if retries > 0 {
+                    warn!("{err}, retrying in {RETRY_DELAY:?}");
+                }
                 continue;
             }
         };
@@ -322,32 +336,34 @@ async fn search_retrying(query: &str, auth: &str, retries: usize) -> Option<Vec<
                 searched.status(),
                 searched.text().await
             );
-
-            warn!("retrying in {RETRY_DELAY:?}");
-            sleep(RETRY_DELAY).await;
             continue;
         }
 
         let Ok(results) = searched.json().await else {
-            warn!("couldnt deserialize response as json, retrying in {RETRY_DELAY:?}");
-            sleep(RETRY_DELAY).await;
+            if retries > 0 {
+                warn!("couldnt deserialize response as json, retrying in {RETRY_DELAY:?}");
+            }
             continue;
         };
 
         let Some(results) = ytmusic::parse_results(&results) else {
-            warn!("couldnt parse search results, retrying in {RETRY_DELAY:?}");
-            sleep(RETRY_DELAY).await;
+            if retries > 0 {
+                warn!("couldnt parse search results, retrying in {RETRY_DELAY:?}");
+            }
             continue;
         };
 
         if results.is_empty() {
-            warn!("search results was empty, retrying in {RETRY_DELAY:?}");
-            sleep(RETRY_DELAY).await;
+            if retries > 0 {
+                warn!("search results were empty, retrying in {RETRY_DELAY:?}");
+            }
             continue;
         }
 
-        break Some(results);
+        return Some(results);
     }
+
+    None
 }
 
 #[inline]

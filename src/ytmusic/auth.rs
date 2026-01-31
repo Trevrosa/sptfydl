@@ -20,7 +20,8 @@ impl Browser {
         }
     }
 
-    pub fn inner(self) -> String {
+    #[must_use]
+    pub fn into_inner(self) -> String {
         self.auth
     }
 }
