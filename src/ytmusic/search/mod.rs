@@ -5,8 +5,9 @@ use std::{sync::OnceLock, time::Instant};
 use anyhow::anyhow;
 use chrono::{Datelike, Utc};
 use regex::Regex;
-use reqwest::{blocking::Response, header::HeaderMap};
+use reqwest::{Response, header::HeaderMap};
 use serde_json::{Value, json};
+use tokio::sync::OnceCell;
 use tracing::{debug, trace};
 
 use crate::CLIENT;
@@ -24,7 +25,7 @@ const USER_AGENT: &str =
 /// # Panics
 ///
 /// This function panics if we fail to [`get_base`] or to extract its cookies.
-pub fn search(
+pub async fn search(
     query: impl AsRef<str>,
     filter: Option<SearchFilter>,
     auth: &str,
@@ -44,29 +45,35 @@ pub fn search(
         }
     }
 
-    static BASE_RESP: OnceLock<String> = OnceLock::new();
-    let base_resp = BASE_RESP.get_or_init(|| get_base().unwrap().text().unwrap());
+    static BASE_RESP: OnceCell<String> = OnceCell::const_new();
+    let base_resp = BASE_RESP
+        .get_or_init(async || get_base().await.unwrap().text().await.unwrap())
+        .await;
 
     // we want to copy the cookies youtube music sends us and keep them.
-    static COOKIES: OnceLock<String> = OnceLock::new();
-    let cookies = COOKIES.get_or_init(|| {
-        let mut cookies = "SOCS=CAI".to_string();
+    static COOKIES: OnceCell<String> = OnceCell::const_new();
+    let cookies = COOKIES
+        .get_or_init(async || {
+            let mut cookies = "SOCS=CAI".to_string();
 
-        for (_n, v) in get_base()
-            .unwrap()
-            .headers()
-            .iter()
-            .filter(|(n, _v)| n.as_str() == "set-cookie")
-        {
-            let cookie_str = v.to_str().unwrap().split(';').next().unwrap();
-            cookies += "; ";
-            cookies += cookie_str;
-        }
+            for (_n, v) in get_base()
+                .await
+                .unwrap()
+                .headers()
+                .iter()
+                .filter(|(n, _v)| n.as_str() == "set-cookie")
+            {
+                let cookie_str = v.to_str().unwrap().split(';').next().unwrap();
+                cookies += "; ";
+                cookies += cookie_str;
+            }
 
-        debug!("saved cookies");
-        cookies
-    });
+            debug!("saved cookies");
+            cookies
+        })
+        .await;
 
+    static VISITOR_ID: OnceLock<String> = OnceLock::new();
     let visitor_id = VISITOR_ID.get_or_init(|| parse_visitor_id(base_resp).unwrap());
 
     let resp = CLIENT
@@ -82,7 +89,8 @@ pub fn search(
         .header("X-Goog-Visitor-Id", visitor_id)
         // // https://github.com/sigma67/ytmusicapi//blob/14a575e1685c21474e03461cbcccc1bdff44b47e/ytmusicapi/ytmusic.py#L180
         // .header("X-Goog-Request-Time", Utc::now().timestamp().to_string())
-        .send()?;
+        .send()
+        .await?;
 
     Ok(resp)
 }
@@ -151,12 +159,13 @@ fn base_headers() -> HeaderMap {
 }
 
 /// Send a get request to the base youtube music url.
-fn get_base() -> anyhow::Result<Response> {
+async fn get_base() -> anyhow::Result<Response> {
     let resp = CLIENT
         .get("https://music.youtube.com")
         .headers(base_headers())
         .header("Cookie", "SOCS=CAI")
-        .send()?;
+        .send()
+        .await?;
 
     trace!("sending normal req to ytm");
 
@@ -164,14 +173,12 @@ fn get_base() -> anyhow::Result<Response> {
         return Err(anyhow!(
             "music.youtube.com gave {}: {:#?}",
             resp.status(),
-            resp.text()
+            resp.text().await
         ));
     }
 
     Ok(resp)
 }
-
-static VISITOR_ID: OnceLock<String> = OnceLock::new();
 
 /// Extract the `X-Goog-Visitor-Id` from a normal request to youtube music.
 ///

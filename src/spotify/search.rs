@@ -15,7 +15,7 @@ use crate::CLIENT;
 /// - `url` was not a spotify url.
 /// - We failed to find an id from `url`.
 /// - We failed to run [`find_track`], [`find_playlist_tracks`], or [`find_album_tracks`].
-pub fn get_from_url(
+pub async fn get_from_url(
     url: impl IntoUrl,
     access_token: impl AsRef<str>,
 ) -> anyhow::Result<(Vec<SpotifyTrack>, Option<String>)> {
@@ -31,12 +31,12 @@ pub fn get_from_url(
     };
 
     if url.path().starts_with("/track") {
-        Ok((vec![find_track(id, access_token)?], None))
+        Ok((vec![find_track(id, access_token).await?], None))
     } else if url.path().starts_with("/playlist") {
-        let (tracks, name) = find_playlist_tracks(id, access_token)?;
+        let (tracks, name) = find_playlist_tracks(id, access_token).await?;
         Ok((tracks, Some(name)))
     } else if url.path().starts_with("/album") {
-        let (tracks, name) = find_album_tracks(id, access_token)?;
+        let (tracks, name) = find_album_tracks(id, access_token).await?;
         Ok((tracks, Some(name)))
     } else {
         Err(anyhow!("spotify url was not a track, album, or a playlist"))
@@ -79,7 +79,7 @@ impl Borrow<str> for SpotifyArtist {
 /// # Errors
 ///
 /// See [`get_resp`].
-pub fn find_track(
+pub async fn find_track(
     track_id: impl AsRef<str>,
     access_token: impl AsRef<str>,
 ) -> anyhow::Result<SpotifyTrack> {
@@ -90,7 +90,7 @@ pub fn find_track(
 
     info!("finding track id `{track_id}`");
 
-    let resp: SpotifyTrack = get_resp(&format!("{TRACK_API}/{track_id}"), access_token)?;
+    let resp: SpotifyTrack = get_resp(&format!("{TRACK_API}/{track_id}"), access_token).await?;
 
     Ok(resp)
 }
@@ -110,7 +110,7 @@ struct AlbumTracks {
 /// # Errors
 ///
 /// See [`get_resp`].
-pub fn find_album_tracks(
+pub async fn find_album_tracks(
     id: impl AsRef<str>,
     access_token: impl AsRef<str>,
 ) -> anyhow::Result<(Vec<SpotifyTrack>, String)> {
@@ -121,7 +121,7 @@ pub fn find_album_tracks(
 
     info!("finding album id `{id}`");
 
-    let resp: Album = get_resp(&format!("{ALBUM_API}/{id}"), access_token)?;
+    let resp: Album = get_resp(&format!("{ALBUM_API}/{id}"), access_token).await?;
 
     let artists = resp.artists.join(", ");
 
@@ -161,7 +161,7 @@ struct PlaylistPagination {
 /// # Errors
 ///
 /// See [`get_resp`].
-pub fn find_playlist_tracks(
+pub async fn find_playlist_tracks(
     id: impl AsRef<str>,
     access_token: impl AsRef<str>,
 ) -> anyhow::Result<(Vec<SpotifyTrack>, String)> {
@@ -172,7 +172,7 @@ pub fn find_playlist_tracks(
 
     info!("finding playlist id `{id}`");
 
-    let resp: Playlist = get_resp(&format!("{PLAYLIST_API}/{id}"), access_token)?;
+    let resp: Playlist = get_resp(&format!("{PLAYLIST_API}/{id}"), access_token).await?;
 
     let mut tracks = Vec::with_capacity(resp.tracks.total as usize);
 
@@ -183,7 +183,7 @@ pub fn find_playlist_tracks(
     while let Some(cur_page) = next_page {
         debug!("getting next page of results");
 
-        let cur_page: PlaylistPagination = get_resp(&cur_page, access_token)?;
+        let cur_page: PlaylistPagination = get_resp(&cur_page, access_token).await?;
         debug!("got {} tracks", cur_page.items.len());
         tracks.extend(cur_page.items.into_iter().filter_map(|p| p.track));
         next_page = cur_page.next;
@@ -200,12 +200,12 @@ pub fn find_playlist_tracks(
 /// - We could not send the request to `url`.
 /// - The request was not successful.
 /// - We could not deserialize the response as json to `T`.
-fn get_resp<T: for<'a> Deserialize<'a>>(url: &str, access_token: &str) -> anyhow::Result<T> {
-    let resp = CLIENT.get(url).bearer_auth(access_token).send()?;
+async fn get_resp<T: for<'a> Deserialize<'a>>(url: &str, access_token: &str) -> anyhow::Result<T> {
+    let resp = CLIENT.get(url).bearer_auth(access_token).send().await?;
 
     if !resp.status().is_success() {
-        return Err(anyhow!("got {}: {:?}", resp.status(), resp.text()));
+        return Err(anyhow!("got {}: {:?}", resp.status(), resp.text().await));
     }
 
-    Ok(resp.json::<T>()?)
+    Ok(resp.json::<T>().await?)
 }

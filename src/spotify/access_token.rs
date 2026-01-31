@@ -28,7 +28,7 @@ impl AccessToken {
     /// Get a new [`AccessToken`] with client credentials.
     ///
     /// <https://developer.spotify.com/documentation/web-api/tutorials/client-credentials-flow>
-    pub fn get(id: &str, secret: &str) -> Option<Self> {
+    pub async fn get(id: &str, secret: &str) -> Option<Self> {
         const AUTH_REQ: &str = "https://accounts.spotify.com/api/token";
         const BASE64: GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -38,7 +38,8 @@ impl AccessToken {
             .post(AUTH_REQ)
             .header("Authorization", format!("Basic {auth}"))
             .form(&[("grant_type", "client_credentials")])
-            .send();
+            .send()
+            .await;
         let resp = match resp {
             Ok(resp) => resp,
             Err(err) => {
@@ -50,12 +51,15 @@ impl AccessToken {
         if !resp.status().is_success() {
             error!(
                 "failed to request access token: `{}`",
-                resp.text().unwrap_or("failed to read body".to_string())
+                resp.text()
+                    .await
+                    .as_deref()
+                    .unwrap_or("failed to read body")
             );
             return None;
         }
 
-        let Ok(mut resp) = resp.json::<AccessToken>() else {
+        let Ok(mut resp) = resp.json::<AccessToken>().await else {
             return None;
         };
         resp.granted = Some(Instant::now());

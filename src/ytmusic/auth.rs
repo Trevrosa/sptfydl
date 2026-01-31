@@ -19,6 +19,11 @@ impl Browser {
             auth: format!("SAPISIDHASH {timestamp}_{hash:x}"),
         }
     }
+
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.auth
+    }
 }
 
 impl AsRef<str> for Browser {
