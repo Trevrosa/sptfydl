@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{ArgAction, Parser};
 use console::Term;
 use dialoguer::{Input, Password};
-use indicatif::ProgressStyle;
+use indicatif::{HumanDuration, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use sptfydl::{load, save, spotify::extract_spotify};
 use tokio::{
@@ -10,7 +10,7 @@ use tokio::{
     process::{ChildStderr, ChildStdout, Command},
     sync::mpsc,
 };
-use tracing::{Instrument, Level, Span, debug, info, info_span, warn};
+use tracing::{Instrument, Level, Span, debug, info, info_span, instrument, warn};
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -73,7 +73,13 @@ async fn main() -> anyhow::Result<()> {
         2..=u8::MAX => Level::TRACE,
     };
 
-    let indicatif_layer = IndicatifLayer::new();
+    let indicatif_layer = IndicatifLayer::new().with_max_progress_bars(
+        11, // 5 downloaders default, + 5 for each ytdlp subspan, + 1 for progress bar
+        Some(
+            ProgressStyle::with_template("...and {pending_progress_bars} more not shown above.")
+                .expect("valid template"),
+        ),
+    );
 
     tracing_subscriber::registry()
         .with(
@@ -119,7 +125,21 @@ async fn main() -> anyhow::Result<()> {
     if extraction.urls.len() == 1 {
         let url = extraction.urls[0].1.clone();
         info!("downloading {url}");
-        ytdlp(url, 1, 0, &ytdlp_args, args.show_ytdlp, None).await;
+        for attempt in 0..=args.download_retries {
+            let success = ytdlp(
+                url.clone(),
+                None,
+                attempt,
+                &ytdlp_args,
+                args.show_ytdlp,
+                None,
+            )
+            .await;
+
+            if success {
+                break;
+            }
+        }
     } else {
         download_many(
             extraction.urls.clone(),
@@ -200,7 +220,7 @@ async fn download_many(
                 loop {
                     debug!("waiting for url");
 
-                    // the `urls` channel will be dropped once all urls are sent,
+                    // `urls_tx` will be dropped once all urls are sent,
                     // meaning that eventually `recv()` will return an error,
                     // letting the task end.
                     //
@@ -217,16 +237,21 @@ async fn download_many(
                         return;
                     };
 
-                    Span::current().record("try", try_num);
-
-                    if try_num > retry_limit + 1 {
+                    if try_num > retry_limit {
                         warn!("track {track_num}: {url} reached retry limit");
                         continue;
                     }
 
                     info!("track {track_num}: {url}");
-                    let success =
-                        ytdlp(url, track_num, try_num, &args, show_ytdlp, Some(&failed_tx)).await;
+                    let success = ytdlp(
+                        url,
+                        Some(track_num),
+                        try_num,
+                        &args,
+                        show_ytdlp,
+                        Some(&failed_tx),
+                    )
+                    .await;
                     results.send(success).await.expect("shouldnt be closed");
                 }
             }
@@ -256,10 +281,11 @@ async fn download_many(
 
 /// returns `true` on success
 #[inline]
+#[instrument(skip(url, args, show_output, failed))]
 async fn ytdlp(
     url: String,
-    track_num: usize,
-    try_num: usize,
+    track: Option<usize>,
+    retry: usize,
     args: &[String],
     show_output: bool,
     // (try_num, track_num, url)
@@ -271,10 +297,13 @@ async fn ytdlp(
         Stdio::null()
     };
 
-    let ytdlp = Command::new("yt-dlp")
-        .arg(&url)
+    let mut ytdlp = Command::new("yt-dlp");
+    ytdlp.arg(&url);
+    if let Some(track) = track {
         // yt-dlp output template
-        .args(["-o", &format!("{track_num}. %(title)s [%(id)s].%(ext)s")])
+        ytdlp.args(["-o", &format!("{track}. %(title)s [%(id)s].%(ext)s")]);
+    }
+    let ytdlp = ytdlp
         .args(["-f", "ba"])
         .args(args)
         .stdout(stdout)
@@ -285,6 +314,7 @@ async fn ytdlp(
     };
 
     redir_output(
+        Span::current(),
         ytdlp.stdout.take(),
         ytdlp.stderr.take().expect("stderr is always captured"),
     );
@@ -299,7 +329,11 @@ async fn ytdlp(
         warn!("yt-dlp terminated with {status}");
         if let Some(failed) = failed {
             failed
-                .send((try_num + 1, track_num, url))
+                .send((
+                    retry + 1,
+                    track.expect("failed is Some so track_num should be Some"),
+                    url,
+                ))
                 .await
                 .expect("channel should be open");
         }
@@ -308,22 +342,32 @@ async fn ytdlp(
     false
 }
 
-fn redir_output(stdout: Option<ChildStdout>, stderr: ChildStderr) {
+fn redir_output(span: Span, stdout: Option<ChildStdout>, stderr: ChildStderr) {
     let mut stderr = BufReader::new(stderr).lines();
 
-    tokio::spawn(async move {
-        while let Ok(Some(line)) = stderr.next_line().await {
-            warn!("{line}");
+    tokio::spawn(
+        async move {
+            while let Ok(Some(line)) = stderr.next_line().await {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                warn!("{line}");
+            }
         }
-    });
+        .instrument(span.clone()),
+    );
 
     if let Some(stdout) = stdout {
         let mut stdout = BufReader::new(stdout).lines();
-        tokio::spawn(async move {
-            while let Ok(Some(line)) = stdout.next_line().await {
-                info!("{line}");
+        tokio::spawn(
+            async move {
+                while let Ok(Some(line)) = stdout.next_line().await {
+                    info!("{line}");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }
 
