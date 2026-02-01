@@ -159,11 +159,12 @@ async fn search_many(
     let start = Instant::now();
     let expected_tracks = spotify_tracks.len();
 
-    let (fails_tx, mut failed_rx) = mpsc::channel(expected_tracks);
-    let (warns_tx, mut warns_rx) = mpsc::channel(expected_tracks);
-
     let (tracks_tx, tracks_rx) = async_channel::bounded(searchers);
+
     let (urls_tx, mut urls_rx) = mpsc::channel(expected_tracks);
+    let (warns_tx, mut warns_rx) = mpsc::channel(expected_tracks);
+    let (fails_tx, mut failed_rx) = mpsc::channel(expected_tracks);
+
     debug!("channel setup took {:?}", start.elapsed());
 
     tokio::spawn(async move {
