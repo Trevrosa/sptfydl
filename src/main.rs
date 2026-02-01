@@ -17,6 +17,7 @@ use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::Subsc
 use std::{
     process::{Stdio, exit},
     sync::Arc,
+    time::Instant,
 };
 
 #[derive(Parser, Debug)]
@@ -89,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     let oauth = get_spotify_oauth()?;
 
+    let start = Instant::now();
     let mut extraction = extract_spotify(
         &oauth.client_id,
         &oauth.client_secret,
@@ -99,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("extracting youtube urls from spotify")?;
+    let search_time = start.elapsed();
 
     let mut ytdlp_args = args.ytdlp_args;
 
@@ -112,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         ytdlp_args.extend(["-P".to_string(), path]);
     }
 
+    let start = Instant::now();
     if extraction.urls.len() == 1 {
         let url = extraction.urls[0].1.clone();
         info!("downloading {url}");
@@ -126,6 +130,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .await;
     }
+    let download_time = start.elapsed();
+
+    info!(
+        "took {} to download {} tracks ({search_time:?} to search, {download_time:?} to download)",
+        HumanDuration(search_time + download_time),
+        extraction.urls.len()
+    );
 
     if !extraction.warnings.is_empty() {
         warn!(
