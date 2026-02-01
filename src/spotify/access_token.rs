@@ -1,6 +1,5 @@
-use std::time::{Duration, Instant};
-
 use base64::{Engine, engine::GeneralPurpose};
+use chrono::{TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
@@ -13,9 +12,7 @@ pub struct AccessToken {
     token_type: String,
     /// seconds
     expires_in: u64,
-
-    #[serde(skip)]
-    granted: Option<Instant>,
+    granted: Option<chrono::DateTime<Utc>>,
 }
 
 impl AsRef<str> for AccessToken {
@@ -62,7 +59,7 @@ impl AccessToken {
         let Ok(mut resp) = resp.json::<AccessToken>().await else {
             return None;
         };
-        resp.granted = Some(Instant::now());
+        resp.granted = Some(Utc::now());
 
         info!(
             "got access token `{}`, expiring in {} secs",
@@ -75,6 +72,6 @@ impl AccessToken {
     #[must_use]
     pub fn expired(&self) -> bool {
         self.granted
-            .is_none_or(|g| g.elapsed() > Duration::from_secs(self.expires_in))
+            .is_none_or(|g| Utc::now() - g > TimeDelta::seconds(self.expires_in.cast_signed()))
     }
 }
