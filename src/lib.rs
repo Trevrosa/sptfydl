@@ -12,6 +12,15 @@ pub mod ytmusic;
 
 pub static CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 
+/// Find the config directory, creating it if it doesn't exist. If all env vars are not found, defaults to `./`
+///
+/// # Linux/Unix
+///
+/// defaults to `XDG_CONFIG_HOME`, falling back to `HOME/.config`
+///
+/// # Windows
+///
+/// defaults to `USERPROFILE/.config`
 fn save_dir<'a>() -> &'a Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -35,6 +44,8 @@ fn save_dir<'a>() -> &'a Path {
     DIR.get_or_init(|| config_dir)
 }
 
+/// Save `T` to file `name` at the config dir found by [`save_dir`].
+/// 
 /// # Errors
 ///
 /// - See [`fs::write`].
@@ -44,6 +55,8 @@ pub fn save<T: Serialize>(obj: &T, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Load file `name` as `T` from the config dir found by [`save_dir`].
+///
 /// # Errors
 ///
 /// - See [`fs::write`].
@@ -53,6 +66,8 @@ pub fn load<T: for<'a> Deserialize<'a>>(name: &str) -> anyhow::Result<T> {
     Ok(serde_yaml::from_str(&file)?)
 }
 
+/// Save `contents` to file `name` at the config dir found by [`save_dir`].
+/// 
 /// # Errors
 ///
 /// See [`fs::write`].
@@ -60,6 +75,8 @@ pub fn save_str(contents: &str, name: &str) -> io::Result<()> {
     fs::write(save_dir().join(name), contents)
 }
 
+/// Load `file` as a string from the config dir found by [`save_dir`].
+/// 
 /// # Errors
 ///
 /// See [`fs::write`].
