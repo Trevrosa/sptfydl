@@ -55,7 +55,7 @@ pub struct SpotifyTrack {
 
 impl Debug for SpotifyTrack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let url = format!("https://open.spotify.com/track/{}", self.id);
+        let url = format_args!("https://open.spotify.com/track/{}", self.id);
         f.debug_struct("SpotifyTrack")
             .field("name", &self.name)
             .field("url", &url)

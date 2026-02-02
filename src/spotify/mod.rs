@@ -316,8 +316,8 @@ async fn search_one(
 /// Search `query` with `auth`, retrying `retries` times. Returns `None` if no results could be found after `retries` retries.
 #[inline]
 async fn search_retrying(query: &str, auth: &str, retries: usize) -> Option<Vec<YtSearchResult>> {
-    for tries in 0..=retries {
-        if tries > 0 {
+    for attempt in 0..=retries {
+        if attempt > 0 {
             sleep(RETRY_DELAY).await;
         }
 

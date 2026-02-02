@@ -179,7 +179,7 @@ async fn download_many(
     urls: Vec<(usize, String)>,
     args: Arc<[String]>,
     downloaders: usize,
-    retries: usize,
+    retry_limit: usize,
     show_ytdlp: bool,
 ) {
     let urls_len = urls.len();
@@ -194,8 +194,6 @@ async fn download_many(
             urls_tx.send(url).await.expect("channel should be open");
         }
     });
-
-    let retry_limit = retries;
 
     let pb_span = info_span!("pb");
 
@@ -221,8 +219,8 @@ async fn download_many(
                     debug!("waiting for url");
 
                     // `urls_tx` will be dropped once all urls are sent,
-                    // meaning that eventually `recv()` will return an error,
-                    // letting the task end.
+                    // closing the channel, meaning that eventually
+                    // `recv()` will return an error, letting the task end.
                     //
                     // conversely, the `failed` channel has multiple cloned senders,
                     // meaning the channel will not close until all tasks end:
@@ -232,12 +230,12 @@ async fn download_many(
                         Err(_) => failed_rx.try_recv(),
                     };
 
-                    let Ok((try_num, track_num, url)) = result else {
+                    let Ok((attempt, track_num, url)) = result else {
                         debug!("no more urls");
                         return;
                     };
 
-                    if try_num > retry_limit {
+                    if attempt > retry_limit {
                         warn!("track {track_num}: {url} reached retry limit");
                         continue;
                     }
@@ -246,7 +244,7 @@ async fn download_many(
                     let success = ytdlp(
                         url,
                         Some(track_num),
-                        try_num,
+                        attempt,
                         &args,
                         show_ytdlp,
                         Some(&failed_tx),
@@ -285,10 +283,10 @@ async fn download_many(
 async fn ytdlp(
     url: String,
     track: Option<usize>,
-    retry: usize,
+    attempt: usize,
     args: &[String],
     show_output: bool,
-    // (try_num, track_num, url)
+    // (attempt, track_num, url)
     failed: Option<&async_channel::Sender<(usize, usize, String)>>,
 ) -> bool {
     let stdout = if show_output {
@@ -330,7 +328,7 @@ async fn ytdlp(
         if let Some(failed) = failed {
             failed
                 .send((
-                    retry + 1,
+                    attempt + 1,
                     track.expect("failed is Some so track_num should be Some"),
                     url,
                 ))
