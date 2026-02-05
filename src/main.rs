@@ -3,11 +3,21 @@ use clap::{ArgAction, Parser};
 use console::Term;
 use dialoguer::{Input, Password};
 use indicatif::{HumanDuration, ProgressStyle};
+use lofty::{
+    config::WriteOptions,
+    file::{AudioFile, TaggedFileExt},
+    picture::{MimeType, Picture, PictureType},
+    probe::Probe,
+    tag::{Accessor, ItemKey, Tag},
+};
 use serde::{Deserialize, Serialize};
-use sptfydl::{load, save, spotify::extract_spotify};
+use sptfydl::{
+    CLIENT, load, save,
+    spotify::{Metadata, Track, extract_spotify},
+};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::{ChildStderr, ChildStdout, Command},
+    process::{ChildStderr, Command},
     sync::mpsc,
 };
 use tracing::{Instrument, Level, Span, debug, info, info_span, instrument, warn};
@@ -15,11 +25,13 @@ use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use std::{
+    path::Path,
     process::{Stdio, exit},
     sync::Arc,
     time::Instant,
 };
 
+#[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -37,6 +49,10 @@ struct Args {
     /// Show the output of ytdlp commands.
     #[arg(long)]
     show_ytdlp: bool,
+
+    /// Disable tagging of mp3 files.
+    #[arg(long)]
+    no_metadata: bool,
 
     /// Skip prompts; always choose the default or first available option.
     #[arg(short, long)]
@@ -94,10 +110,18 @@ async fn main() -> anyhow::Result<()> {
 
     ctrlc::set_handler(handle_exit)?;
 
+    let mut ytdlp_args = args.ytdlp_args;
+
+    ytdlp_args.push("--no-playlist".to_string());
+
+    if args.mp3 {
+        ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
+    }
+
     let oauth = get_spotify_oauth()?;
 
     let start = Instant::now();
-    let mut extraction = extract_spotify(
+    let extraction = extract_spotify(
         &oauth.client_id,
         &oauth.client_secret,
         &args.url,
@@ -109,44 +133,35 @@ async fn main() -> anyhow::Result<()> {
     .context("extracting youtube urls from spotify")?;
     let search_time = start.elapsed();
 
-    let mut ytdlp_args = args.ytdlp_args;
-
-    ytdlp_args.push("--no-playlist".to_string());
-
-    if args.mp3 {
-        ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
-    }
-
-    if let Some(path) = extraction.name.take() {
-        ytdlp_args.extend(["-P".to_string(), path]);
+    if let Some(path) = extraction.name.as_ref() {
+        ytdlp_args.extend(["-P".to_string(), path.clone()]);
     }
 
     let start = Instant::now();
-    if extraction.urls.len() == 1 {
-        let url = extraction.urls[0].1.clone();
+    if extraction.tracks.len() == 1 {
+        let (_, track) = extraction.tracks[0].clone();
+        let Track { mut url, metadata } = track;
         info!("downloading {url}");
         for attempt in 0..=args.download_retries {
-            let success = ytdlp(
-                url.clone(),
-                None,
-                attempt,
-                &ytdlp_args,
-                args.show_ytdlp,
-                None,
-            )
-            .await;
+            let (output_file, new_url) =
+                ytdlp(url, None, attempt, args.show_ytdlp, &ytdlp_args).await;
 
-            if success {
+            url = new_url;
+
+            if let Some(path) = output_file {
+                run_tagger(path.as_ref(), metadata, &url, !args.no_metadata, args.mp3).await;
                 break;
             }
         }
     } else {
         download_many(
-            extraction.urls.clone(),
+            extraction.tracks.clone(),
             Arc::from(ytdlp_args),
             args.downloaders,
             args.download_retries,
             args.show_ytdlp,
+            !args.no_metadata,
+            args.mp3,
         )
         .await;
     }
@@ -155,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         "took {} to download {} tracks ({search_time:?} to search, {download_time:?} to download)",
         HumanDuration(search_time + download_time),
-        extraction.urls.len()
+        extraction.tracks.len()
     );
 
     if !extraction.warnings.is_empty() {
@@ -176,22 +191,24 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn download_many(
-    urls: Vec<(usize, String)>,
+    urls: Vec<(usize, Track)>,
     args: Arc<[String]>,
     downloaders: usize,
     retry_limit: usize,
     show_ytdlp: bool,
+    tag_metadata: bool,
+    convert_mp3: bool,
 ) {
     let urls_len = urls.len();
 
-    let (urls_tx, urls_rx) = async_channel::bounded(downloaders);
+    let (tracks_tx, tracks_rx) = async_channel::bounded(downloaders);
     // we dont want this channel to block on `send`s
     let (failed_tx, failed_rx) = async_channel::bounded(urls_len);
     let (results_tx, mut results_rx) = mpsc::channel(urls_len);
 
     tokio::spawn(async move {
         for url in urls {
-            urls_tx.send(url).await.expect("channel should be open");
+            tracks_tx.send(url).await.expect("channel should be open");
         }
     });
 
@@ -209,7 +226,7 @@ async fn download_many(
     for task in 0..downloaders {
         let failed_tx = failed_tx.clone();
         let failed_rx = failed_rx.clone();
-        let urls = urls_rx.clone();
+        let tracks = tracks_rx.clone();
         let results = results_tx.clone();
         let args = args.clone();
 
@@ -225,15 +242,17 @@ async fn download_many(
                     // conversely, the `failed` channel has multiple cloned senders,
                     // meaning the channel will not close until all tasks end:
                     // using `try_recv()` ensures that the task will end instead of waiting forever.
-                    let result = match urls.recv().await {
+                    let result = match tracks.recv().await {
                         Ok((i, url)) => Ok((0, i + 1, url)),
                         Err(_) => failed_rx.try_recv(),
                     };
 
-                    let Ok((attempt, track_num, url)) = result else {
+                    let Ok((attempt, track_num, track)) = result else {
                         debug!("no more urls");
                         return;
                     };
+
+                    let Track { url, metadata } = track;
 
                     if attempt > retry_limit {
                         warn!("track {track_num}: {url} reached retry limit");
@@ -241,16 +260,21 @@ async fn download_many(
                     }
 
                     info!("track {track_num}: {url}");
-                    let success = ytdlp(
-                        url,
-                        Some(track_num),
-                        attempt,
-                        &args,
-                        show_ytdlp,
-                        Some(&failed_tx),
-                    )
-                    .await;
-                    results.send(success).await.expect("shouldnt be closed");
+                    let (output_file, url) =
+                        ytdlp(url, Some(track_num), attempt, show_ytdlp, &args).await;
+                    results
+                        .send(output_file.is_some())
+                        .await
+                        .expect("shouldnt be closed");
+
+                    if let Some(path) = output_file {
+                        run_tagger(path.as_ref(), metadata, &url, tag_metadata, convert_mp3).await;
+                    } else {
+                        failed_tx
+                            .send((attempt + 1, track_num, Track::new(url, metadata)))
+                            .await
+                            .expect("channel should be open");
+                    }
                 }
             }
             .instrument(info_span!("downloader", id = task + 1)),
@@ -277,70 +301,134 @@ async fn download_many(
     }
 }
 
-/// returns `true` on success
+/// returns a (`output_file`, `url`). `output_file` will always be `Some` on success.
 #[inline]
-#[instrument(skip(url, args, show_output, failed))]
+#[instrument(skip(url, args, show_output), fields(attempt = retry + 1))]
 async fn ytdlp(
     url: String,
     track: Option<usize>,
-    attempt: usize,
-    args: &[String],
+    retry: usize,
     show_output: bool,
-    // (attempt, track_num, url)
-    failed: Option<&async_channel::Sender<(usize, usize, String)>>,
-) -> bool {
-    let stdout = if show_output {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    };
-
+    args: &[String],
+) -> (Option<String>, String) {
     let mut ytdlp = Command::new("yt-dlp");
     ytdlp.arg(&url);
     if let Some(track) = track {
         // yt-dlp output template
         ytdlp.args(["-o", &format!("{track}. %(title)s [%(id)s].%(ext)s")]);
     }
+    if show_output {
+        ytdlp.arg("--verbose");
+    }
     let ytdlp = ytdlp
         .args(["-f", "ba"])
+        .args(["--quiet", "--print", "after_move:filepath"])
         .args(args)
-        .stdout(stdout)
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let Ok(mut ytdlp) = ytdlp else {
-        return false;
+        return (None, url);
     };
 
     redir_output(
         Span::current(),
-        ytdlp.stdout.take(),
         ytdlp.stderr.take().expect("stderr is always captured"),
+        !show_output,
     );
 
-    let status = ytdlp.wait().await;
+    let result = ytdlp.wait_with_output().await;
 
-    if let Ok(status) = status {
+    if let Ok(result) = result {
+        let status = result.status;
+
         if status.success() {
-            return true;
+            let path = String::from_utf8(result.stdout[0..result.stdout.len() - 1].to_vec())
+                .expect("should be utf8");
+            return (Some(path), url);
         }
 
         warn!("yt-dlp terminated with {status}");
-        if let Some(failed) = failed {
-            failed
-                .send((
-                    attempt + 1,
-                    track.expect("failed is Some so track_num should be Some"),
-                    url,
-                ))
-                .await
-                .expect("channel should be open");
-        }
     }
 
-    false
+    (None, url)
 }
 
-fn redir_output(span: Span, stdout: Option<ChildStdout>, stderr: ChildStderr) {
+/// only warns if user set --mp3, but still tag in case user converts file to a different but supported format.
+async fn run_tagger(path: &Path, metadata: Metadata, url: &str, should_tag: bool, mp3: bool) {
+    if should_tag
+        && let Err(err) = tagger(path, metadata, url).await
+        && mp3
+    {
+        warn!("failed to tag file {path:?}: {err}");
+    }
+}
+
+#[instrument(skip(metadata, url))]
+async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()> {
+    let mut file = Probe::open(path)?.guess_file_type()?.read()?;
+
+    debug!("tagging file {path:?}");
+
+    let mut tag = Tag::new(file.primary_tag_type());
+
+    // album & cover
+    tag.set_album(metadata.album_name);
+    let cover = CLIENT.get(metadata.cover_url).send().await?;
+    let mime_type: Option<MimeType> = cover
+        .headers()
+        .get("content-type")
+        .iter()
+        .find_map(|h| h.to_str().map(MimeType::from_str).ok());
+    let image = cover.bytes().await?;
+    let picture = Picture::new_unchecked(PictureType::CoverFront, mime_type, None, image.to_vec());
+    tag.push_picture(picture);
+
+    // artists & genres
+    let (artists, genres) = Metadata::artists_and_genres(metadata.artists, '\0');
+    tag.set_artist(artists);
+    tag.set_genre(genres);
+
+    // all other
+    tag.set_title(metadata.name);
+    tag.set_disk(metadata.disc_number);
+
+    if metadata.explicit {
+        tag.insert_text(ItemKey::ParentalAdvisory, "explicit".to_string());
+    }
+
+    tag.insert_text(ItemKey::Isrc, metadata.external_ids.isrc);
+
+    let year = metadata
+        .release_date
+        .split('-')
+        .next()
+        .unwrap_or(&metadata.release_date);
+    if let Ok(year) = year.parse() {
+        tag.set_year(year);
+    }
+
+    tag.set_comment(format!(
+        r"
+    original spotify url: https://open.spotify.com/track/{}
+    downloaded from: {url}
+
+    by sptfydl!
+    ",
+        metadata.spotify_id
+    ));
+
+    file.insert_tag(tag);
+
+    let start = Instant::now();
+    // TODO: measure time with spawn_blocking and none
+    file.save_to_path(path, WriteOptions::default())?;
+    debug!("save took {:?}", start.elapsed());
+
+    Ok(())
+}
+
+fn redir_output(span: Span, stderr: ChildStderr, warn: bool) {
     let mut stderr = BufReader::new(stderr).lines();
 
     tokio::spawn(
@@ -350,23 +438,15 @@ fn redir_output(span: Span, stdout: Option<ChildStdout>, stderr: ChildStderr) {
                 if line.is_empty() {
                     continue;
                 }
-                warn!("{line}");
-            }
-        }
-        .instrument(span.clone()),
-    );
-
-    if let Some(stdout) = stdout {
-        let mut stdout = BufReader::new(stdout).lines();
-        tokio::spawn(
-            async move {
-                while let Ok(Some(line)) = stdout.next_line().await {
+                if warn {
+                    warn!("{line}");
+                } else {
                     info!("{line}");
                 }
             }
-            .instrument(span),
-        );
-    }
+        }
+        .instrument(span),
+    );
 }
 
 fn handle_exit() {

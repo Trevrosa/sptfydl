@@ -1,6 +1,6 @@
 [package]
 name = "sptfydl"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Trevrosa/sptfydl"
@@ -10,7 +10,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.100"
-clap = { version = "4.5.56", features = ["derive"] }
+clap = { version = "4.5.57", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "process"] }
 async-channel = "2.5.0"
@@ -21,16 +21,16 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
 
 reqwest = { version = "0.13.1", features = ["form", "query", "json", "gzip"] }
-regex = { version = "1.12.2", features = ["perf", "std", "unicode-perl"], default-features = false }
+regex = { version = "1.12.3", features = ["perf", "std", "unicode-perl"], default-features = false }
 sha1 = { version = "0.10.6" }
 base64 = "0.22.1"
 serde_json = "1.0.149"
 chrono = { version = "0.4.43", features = ["serde"] }
 serde_yaml = "0.9.34"
 dialoguer = "0.12.0"
-tracing-panic = "0.1.2"
 ctrlc = "3.5.1"
 console = "0.16.2"
+lofty = "0.22.4"
 
 [profile.release]
 lto = "fat"

@@ -2,14 +2,19 @@ pub mod access_token;
 pub use access_token::AccessToken;
 
 pub mod search;
+pub use search::get_from_url;
+
+pub mod types;
+pub use types::{Extraction, Metadata, Track};
+
 use anyhow::anyhow;
 use dialoguer::Select;
 use indicatif::ProgressStyle;
-pub use search::get_from_url;
 use tokio::{sync::mpsc, time::sleep};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use std::{
+    collections::VecDeque,
     fmt::Write as FmtWrite,
     fs,
     io::{Write, stdin, stdout},
@@ -21,7 +26,7 @@ use tracing::{Instrument, Span, debug, info, info_span, trace, warn};
 
 use crate::{
     load, load_str, save, save_str,
-    spotify::search::SpotifyTrack,
+    spotify::search::{SimplifiedArtist, SpotifyTrack, get_artists, get_many_artists},
     ytmusic::{
         SearchResult as YtSearchResult,
         auth::{Browser, parse_cookie},
@@ -32,22 +37,6 @@ use super::ytmusic;
 
 const SPOTIFY_TOKEN_CONFIG_NAME: &str = "spotify_token.yaml";
 const YTM_DATA_CONFIG_NAME: &str = "ytm_browser_data";
-
-#[derive(Debug)]
-pub struct Extraction {
-    pub urls: Vec<(usize, String)>,
-    pub name: Option<String>,
-    /// guaranteed to be in range of `urls`
-    pub warnings: Vec<usize>,
-    pub failures: usize,
-}
-
-impl Extraction {
-    #[must_use]
-    pub fn warnings(&self) -> Vec<&(usize, String)> {
-        self.warnings.iter().map(|idx| &self.urls[*idx]).collect()
-    }
-}
 
 /// Returns `Vec<(usize, String)>` because some tracks may not be found from ytmusic,
 /// so some tracks may be missing,
@@ -86,7 +75,7 @@ pub async fn extract_spotify(
         token
     };
 
-    let (mut spotify_tracks, name) = get_from_url(spotify_url, token).await?;
+    let (mut spotify_tracks, name) = get_from_url(spotify_url, token.as_ref()).await?;
     let first_name = spotify_tracks[0].name.clone();
 
     info!("got {} tracks", spotify_tracks.len());
@@ -100,11 +89,19 @@ pub async fn extract_spotify(
         let track = spotify_tracks.pop().expect("len is 1");
         debug!("metadata: {track:#?}");
         info!("searching for {}", track.name);
-        search_one(track, auth.as_ref(), no_interaction, retries).await
+        search_one(
+            track,
+            auth.as_ref(),
+            token.as_ref(),
+            no_interaction,
+            retries,
+        )
+        .await
     } else {
         search_many(
             spotify_tracks,
             Arc::from(auth.into_inner()),
+            token.as_ref(),
             searchers,
             retries,
         )
@@ -112,9 +109,7 @@ pub async fn extract_spotify(
     };
 
     if !failed.is_empty() {
-        if !no_interaction {
-            warn!("{} songs failed, check report", failed.len());
-        }
+        warn!("{} songs failed, check report", failed.len());
 
         let report = failed.iter().fold(String::new(), |mut report, (n, t)| {
             let _ = writeln!(report, "track #{n}: {t:#?}");
@@ -131,7 +126,7 @@ pub async fn extract_spotify(
         Err(anyhow!("got no urls"))
     } else {
         Ok(Extraction {
-            urls,
+            tracks: urls,
             name,
             warnings,
             failures: failed.len(),
@@ -139,10 +134,10 @@ pub async fn extract_spotify(
     }
 }
 
-const RETRY_DELAY: Duration = Duration::from_secs(5);
+const RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// (`urls`, `warns`, `fails`)
-type SearchResult = (Vec<(usize, String)>, Vec<usize>, Vec<(usize, SpotifyTrack)>);
+type SearchResult = (Vec<(usize, Track)>, Vec<usize>, Vec<(usize, SpotifyTrack)>);
 
 /// search ytmusic for the `spotify_tracks`
 ///
@@ -152,7 +147,8 @@ type SearchResult = (Vec<(usize, String)>, Vec<usize>, Vec<(usize, SpotifyTrack)
 #[inline]
 async fn search_many(
     spotify_tracks: Vec<SpotifyTrack>,
-    auth: Arc<str>,
+    yt_auth: Arc<str>,
+    spotify_auth: &str,
     searchers: usize,
     retries: usize,
 ) -> SearchResult {
@@ -161,7 +157,7 @@ async fn search_many(
 
     let (tracks_tx, tracks_rx) = async_channel::bounded(searchers);
 
-    let (urls_tx, mut urls_rx) = mpsc::channel(expected_tracks);
+    let (results_tx, mut results_rx) = mpsc::channel(expected_tracks);
     let (warns_tx, mut warns_rx) = mpsc::channel(expected_tracks);
     let (fails_tx, mut failed_rx) = mpsc::channel(expected_tracks);
 
@@ -185,11 +181,11 @@ async fn search_many(
 
     let mut searcher_handles = Vec::with_capacity(searchers);
     for task in 0..searchers {
-        let urls = urls_tx.clone();
+        let urls = results_tx.clone();
         let tracks = tracks_rx.clone();
         let warns = warns_tx.clone();
         let failed = fails_tx.clone();
-        let auth = auth.clone();
+        let yt_auth = yt_auth.clone();
 
         let handle = tokio::spawn(
             async move {
@@ -208,7 +204,7 @@ async fn search_many(
                         track.artists.iter().map(|a| a.name.as_str()).collect();
                     let query = format!("{} {}", track.name, artists.join(" "));
 
-                    let Some(mut results) = search_retrying(&query, &auth, retries).await else {
+                    let Some(mut results) = search_retrying(&query, &yt_auth, retries).await else {
                         failed
                             .send((i + 1, track))
                             .await
@@ -232,7 +228,9 @@ async fn search_many(
                     }
 
                     let url = results[choice].link_or_default().to_string();
-                    urls.send((i, url)).await.expect("shouldnt be closed");
+                    urls.send((i, (url, track)))
+                        .await
+                        .expect("shouldnt be closed");
                 }
             }
             .instrument(info_span!("searcher", id = task + 1)),
@@ -242,13 +240,13 @@ async fn search_many(
     }
 
     // ensure channels close so `recv_many()` doesn't poll forever
-    drop((urls_tx, warns_tx, fails_tx));
+    drop((results_tx, warns_tx, fails_tx));
 
     debug!("total setup took {:?}", start.elapsed());
 
     let mut urls = Vec::with_capacity(expected_tracks);
     async {
-        while let Some(url) = urls_rx.recv().await {
+        while let Some(url) = results_rx.recv().await {
             Span::current().pb_inc(1);
             urls.push(url);
         }
@@ -256,32 +254,59 @@ async fn search_many(
     .instrument(pb_span)
     .await;
 
+    debug!("getting artists in bulk");
+
+    let tracks = simp_to_full(urls, spotify_auth).await;
+
     for handle in searcher_handles {
         if let Err(err) = handle.await {
             warn!("a downloader failed: {err}");
         }
     }
 
-    debug!("collecting fails/warns from channels");
+    debug!("collecting fails / warns from channels");
 
     let mut warnings = Vec::new();
     warns_rx.recv_many(&mut warnings, expected_tracks).await;
     let mut failed = Vec::new();
     failed_rx.recv_many(&mut failed, expected_tracks).await;
 
-    (urls, warnings, failed)
+    (tracks, warnings, failed)
+}
+
+#[inline]
+async fn simp_to_full(
+    urls: Vec<(usize, (String, SpotifyTrack))>,
+    spotify_auth: &str,
+) -> Vec<(usize, Track)> {
+    let simplified_artists: Vec<&Vec<SimplifiedArtist>> =
+        urls.iter().map(|t| &t.1.1.artists).collect();
+    let artists = get_many_artists(&simplified_artists, spotify_auth)
+        .await
+        .expect("failed to get artists");
+    let mut artists = VecDeque::from(artists);
+
+    let mut tracks = Vec::with_capacity(urls.len());
+    for (track_num, (url, track)) in urls {
+        let metadata = track.into_metadata(artists.pop_front().expect("it must be in range"));
+        tracks.push((track_num, Track::new(url, metadata)));
+    }
+
+    tracks
 }
 
 #[inline]
 async fn search_one(
     track: SpotifyTrack,
-    auth: &str,
+    yt_auth: &str,
+    spotify_auth: &str,
     no_interaction: bool,
     retries: usize,
 ) -> SearchResult {
-    let artists: Vec<&str> = track.artists.iter().map(|a| a.name.as_str()).collect();
-    let query = format!("{} {}", track.name, artists.join(" "));
-    if let Some(mut results) = search_retrying(&query, auth, retries).await {
+    let artists = get_artists(&track.artists, spotify_auth).await.unwrap();
+    let artist_strs: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
+    let query = format!("{} {}", track.name, artist_strs.join(" "));
+    if let Some(mut results) = search_retrying(&query, yt_auth, retries).await {
         results[0].title.push_str("Best Result");
 
         debug!("got {} results", results.len());
@@ -307,7 +332,11 @@ async fn search_one(
         }
 
         let url = results[choice].link_or_default().to_string();
-        (vec![(0, url)], warnings, vec![])
+        (
+            vec![(0, Track::new(url, track.into_metadata(artists)))],
+            warnings,
+            vec![],
+        )
     } else {
         (vec![], vec![], vec![(0, track)])
     }

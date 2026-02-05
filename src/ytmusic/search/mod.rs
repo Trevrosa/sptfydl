@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_statements)]
+
 pub mod parsing;
 
 use std::{sync::OnceLock, time::Instant};

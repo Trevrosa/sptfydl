@@ -5,7 +5,7 @@ use reqwest::IntoUrl;
 use serde::Deserialize;
 use tracing::{debug, info};
 
-use crate::CLIENT;
+use crate::{CLIENT, spotify::Metadata};
 
 /// Parse the spotify id from `url` and get a list of [`SpotifyTrack`]s and the name (of the playlist or album, if `url` is one.)
 ///
@@ -43,6 +43,11 @@ pub async fn get_from_url(
     }
 }
 
+#[derive(Deserialize, Debug)]
+pub struct Image {
+    url: String,
+}
+
 /// Only some of the fields.
 ///
 /// <https://developer.spotify.com/documentation/web-api/reference/get-track>
@@ -50,24 +55,158 @@ pub async fn get_from_url(
 pub struct SpotifyTrack {
     pub name: String,
     pub id: String,
-    pub artists: Vec<SpotifyArtist>,
+    /// used to find its image
+    pub album: serde_json::Value,
+    /// use [`get_artists`] to get the actual artist info
+    pub artists: Vec<SimplifiedArtist>,
+    pub disc_number: u32,
+    pub explicit: bool,
+    pub external_ids: ExternalIds,
+    pub track_number: u32,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ExternalIds {
+    pub isrc: String,
+    // pub ean: String,
+    // pub upc: String,
+}
+
+impl SpotifyTrack {
+    /// Turns `self` into [`Metadata`] with `artists`.
+    #[must_use]
+    pub fn into_metadata(self, artists: Vec<SpotifyArtist>) -> Metadata {
+        let (album_name, cover_url, release_date) = SpotifyTrack::extract_album(self.album);
+        Metadata {
+            artists,
+            disc_number: self.disc_number,
+            name: self.name,
+            spotify_id: self.id,
+            explicit: self.explicit,
+            external_ids: self.external_ids,
+            track_number: self.track_number,
+            release_date,
+            cover_url,
+            album_name,
+        }
+    }
+
+    // is an associated function to allow partial moves
+    /// Returns (`album_name`, `cover_url`, `release_date`).
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn extract_album(album: serde_json::Value) -> (String, String, String) {
+        // used here only to find the image url
+        #[derive(Deserialize)]
+        struct Album {
+            name: String,
+            images: Vec<Image>,
+            release_date: String,
+        }
+
+        let mut album: Album = serde_json::from_value(album).expect("must exist");
+        let cover_url = album.images.swap_remove(0).url;
+
+        (album.name, cover_url, album.release_date)
+    }
 }
 
 impl Debug for SpotifyTrack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let url = format_args!("https://open.spotify.com/track/{}", self.id);
+        let album = self.album.clone();
         f.debug_struct("SpotifyTrack")
             .field("name", &self.name)
             .field("url", &url)
             .field("artists", &self.artists)
-            .finish()
+            .field("album_info", &SpotifyTrack::extract_album(album))
+            .finish_non_exhaustive()
     }
 }
 
-/// I only want the name.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct SimplifiedArtist {
+    pub name: String,
+    id: String,
+}
+
+impl Borrow<str> for SimplifiedArtist {
+    fn borrow(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Borrow<str> for &SimplifiedArtist {
+    fn borrow(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Turn [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
+pub async fn get_artists(
+    from: &[SimplifiedArtist],
+    access_token: &str,
+) -> anyhow::Result<Vec<SpotifyArtist>> {
+    let mut artists = get_many_artists(&[&from.to_vec()], access_token).await?;
+    Ok(artists.pop().expect("must exist"))
+}
+
+// TODO: cleanup some of this code?
+
+/// Turn multiple [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
+///
+/// Order is preserved.
+///
+/// # Errors
+///
+/// Will fail if any artist could not be found, or if the request fails to be sent.
+pub async fn get_many_artists(
+    artist_arrays: &[&Vec<SimplifiedArtist>],
+    access_token: &str,
+) -> anyhow::Result<Vec<Vec<SpotifyArtist>>> {
+    const ARTIST_API: &str = "https://api.spotify.com/v1/artists";
+
+    #[derive(Deserialize)]
+    struct SpotifyArtists {
+        artists: Vec<SpotifyArtist>,
+    }
+
+    let mut all_artists = Vec::with_capacity(artist_arrays.len());
+
+    {
+        let artists: Vec<&SimplifiedArtist> = artist_arrays.iter().copied().flatten().collect();
+        for chunk in artists.chunks(50) {
+            let ids = chunk.join(",");
+            let resp: SpotifyArtists =
+                get_resp(&format!("{ARTIST_API}/?ids={ids}"), access_token).await?;
+            all_artists.extend(resp.artists);
+        }
+    }
+
+    debug!("got {} total artists", all_artists.len());
+
+    let mut result = Vec::with_capacity(artist_arrays.len());
+    for array in artist_arrays {
+        let artists = array
+            .iter()
+            .map(|want| {
+                all_artists
+                    .iter()
+                    .find(|a| a.name == want.name)
+                    .expect("must exist")
+                    .clone()
+            })
+            .collect();
+        result.push(artists);
+    }
+
+    Ok(result)
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct SpotifyArtist {
     pub name: String,
+    pub genres: Vec<String>,
 }
 
 impl Borrow<str> for SpotifyArtist {
@@ -76,16 +215,18 @@ impl Borrow<str> for SpotifyArtist {
     }
 }
 
+/// Find a track by its `id` using `access_token` for authorization.
+///
 /// # Errors
 ///
 /// See [`get_resp`].
 pub async fn find_track(
-    track_id: impl AsRef<str>,
+    id: impl AsRef<str>,
     access_token: impl AsRef<str>,
 ) -> anyhow::Result<SpotifyTrack> {
     const TRACK_API: &str = "https://api.spotify.com/v1/tracks";
 
-    let track_id = track_id.as_ref();
+    let track_id = id.as_ref();
     let access_token = access_token.as_ref();
 
     info!("finding track id `{track_id}`");
@@ -98,7 +239,7 @@ pub async fn find_track(
 #[derive(Deserialize, Debug)]
 struct Album {
     name: String,
-    artists: Vec<SpotifyArtist>,
+    artists: Vec<SimplifiedArtist>,
     tracks: AlbumTracks,
 }
 
@@ -107,6 +248,8 @@ struct AlbumTracks {
     items: Vec<SpotifyTrack>,
 }
 
+/// Find an album's tracks by its `id` using `access_token` for authorization.
+///
 /// # Errors
 ///
 /// See [`get_resp`].
@@ -123,7 +266,7 @@ pub async fn find_album_tracks(
 
     let resp: Album = get_resp(&format!("{ALBUM_API}/{id}"), access_token).await?;
 
-    let artists = resp.artists.join(", ");
+    let artists = get_artists(&resp.artists, access_token).await?.join(", ");
 
     Ok((resp.tracks.items, format!("{} - {artists}", resp.name)))
 }
@@ -158,6 +301,8 @@ struct PlaylistPagination {
     items: Vec<PlaylistTrack>,
 }
 
+/// Find a playlist's tracks by its `id` using `access_token` for authorization.
+///
 /// # Errors
 ///
 /// See [`get_resp`].
@@ -194,6 +339,8 @@ pub async fn find_playlist_tracks(
     Ok((tracks, format!("{} - {owner}", resp.name)))
 }
 
+/// Get `url`, parsing as json to `T`, using `access_token` for authorization.
+///
 /// # Errors
 ///
 /// This function fails if:

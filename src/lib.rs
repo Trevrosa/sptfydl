@@ -45,7 +45,7 @@ fn save_dir<'a>() -> &'a Path {
 }
 
 /// Save `T` to file `name` at the config dir found by [`save_dir`].
-/// 
+///
 /// # Errors
 ///
 /// - See [`fs::write`].
@@ -67,7 +67,7 @@ pub fn load<T: for<'a> Deserialize<'a>>(name: &str) -> anyhow::Result<T> {
 }
 
 /// Save `contents` to file `name` at the config dir found by [`save_dir`].
-/// 
+///
 /// # Errors
 ///
 /// See [`fs::write`].
@@ -76,7 +76,7 @@ pub fn save_str(contents: &str, name: &str) -> io::Result<()> {
 }
 
 /// Load `file` as a string from the config dir found by [`save_dir`].
-/// 
+///
 /// # Errors
 ///
 /// See [`fs::write`].

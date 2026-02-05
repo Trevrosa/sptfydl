@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use base64::{Engine, engine::GeneralPurpose};
 use chrono::{TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,12 @@ pub struct AccessToken {
     /// seconds
     expires_in: u64,
     granted: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<AccessToken> for Arc<str> {
+    fn from(val: AccessToken) -> Self {
+        Arc::from(val.access_token)
+    }
 }
 
 impl AsRef<str> for AccessToken {
