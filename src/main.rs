@@ -118,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ytdlp_args = args.ytdlp_args;
 
     ytdlp_args.push("--no-playlist".to_string());
+    ytdlp_args.push("--restrict-filenames".to_string());
 
     if !args.no_mp3 {
         ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
