@@ -24,6 +24,8 @@ Options:
           The number of concurrent downloads [default: 5]
   -s, --searchers <SEARCHERS>
           The number of concurrent searches [default: 3]
+  -P, --path <PATH>
+          The path to output to
   -v, --verbose...
           Be a bit more verbose. Can be applied more than once (-v, -vv)
       --show-ytdlp
