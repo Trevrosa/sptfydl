@@ -39,9 +39,13 @@ struct Args {
     /// The spotify url to download.
     url: String,
 
-    /// Tell yt-dlp to convert to mp3.
-    #[arg(long)]
-    mp3: bool,
+    /// The number of concurrent downloads.
+    #[arg(short, long, default_value_t = 5)]
+    downloaders: usize,
+
+    /// The number of concurrent searches.
+    #[arg(short, long, default_value_t = 3)]
+    searchers: usize,
 
     /// Be a bit more verbose. Can be applied more than once (-v, -vv)
     #[arg(short, long, action = ArgAction::Count)]
@@ -51,6 +55,10 @@ struct Args {
     #[arg(long)]
     show_ytdlp: bool,
 
+    /// Tell yt-dlp not to convert to mp3.
+    #[arg(long)]
+    no_mp3: bool,
+
     /// Disable tagging of mp3 files.
     #[arg(long)]
     no_metadata: bool,
@@ -58,14 +66,6 @@ struct Args {
     /// Skip prompts; always choose the default or first available option.
     #[arg(short, long)]
     no_interaction: bool,
-
-    /// The number of concurrent downloads.
-    #[arg(short, long, default_value_t = 5)]
-    downloaders: usize,
-
-    /// The number of concurrent searches.
-    #[arg(short, long, default_value_t = 3)]
-    searchers: usize,
 
     /// The number of retries allowed for downloads.
     #[arg(long, default_value_t = 5)]
@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 
     ytdlp_args.push("--no-playlist".to_string());
 
-    if args.mp3 {
+    if !args.no_mp3 {
         ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
     }
 
@@ -150,7 +150,14 @@ async fn main() -> anyhow::Result<()> {
             url = new_url;
 
             if let Some(path) = output_file {
-                run_tagger(path.as_ref(), metadata, &url, !args.no_metadata, args.mp3).await;
+                run_tagger(
+                    path.as_ref(),
+                    metadata,
+                    &url,
+                    !args.no_metadata,
+                    !args.no_mp3,
+                )
+                .await;
                 break;
             }
         }
@@ -162,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
             args.download_retries,
             args.show_ytdlp,
             !args.no_metadata,
-            args.mp3,
+            !args.no_mp3,
         )
         .await;
     }
@@ -220,7 +227,7 @@ async fn download_many(
     let pb_span = info_span!("pb");
 
     pb_span.pb_set_style(
-        &ProgressStyle::with_template("{wide_bar} {pos}/{len} ({elapsed})")
+        &ProgressStyle::with_template("{wide_bar} {pos}/{len} ({elapsed}) (eta: {eta})")
             .expect("valid template"),
     );
     pb_span.pb_set_length(urls_len as u64);
