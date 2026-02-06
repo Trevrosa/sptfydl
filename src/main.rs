@@ -408,7 +408,7 @@ async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()
     tag.push_picture(picture);
 
     // artists & genres
-    let (artists, genres) = Metadata::to_tag_values(metadata.artists, '\0');
+    let (artists, genres) = Metadata::to_tag_values(metadata.artists, "; ");
     tag.set_artist(artists);
     tag.set_genre(genres);
 

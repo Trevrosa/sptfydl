@@ -63,20 +63,19 @@ pub struct Metadata {
 impl Metadata {
     /// can turn `self.artists` into (`artists_tag_value`, `genres_tag_value`)
     #[inline]
-    pub fn to_tag_values(artists: Vec<SpotifyArtist>, separator: char) -> (String, String) {
+    pub fn to_tag_values(artists: Vec<SpotifyArtist>, separator: &str) -> (String, String) {
         let (artists, genres): (Vec<_>, Vec<_>) =
             artists.into_iter().map(SpotifyArtist::into_tuple).unzip();
 
         let mut genres = genres.iter().flatten().fold(String::new(), |mut acc, g| {
             acc.push_str(g);
-            acc.push(separator);
+            acc.push_str(separator);
             acc
         });
-        // remove trailling \0
-        genres.pop();
-
-        let mut tmp = [0; 1];
-        let separator: &str = separator.encode_utf8(&mut tmp);
+        // remove trailling sep
+        for _ in 0..separator.len() {
+            genres.pop();
+        }
 
         (artists.join(separator), genres)
     }

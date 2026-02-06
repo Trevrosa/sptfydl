@@ -171,7 +171,7 @@ async fn search_many(
     let pb_span = info_span!("pb");
 
     pb_span.pb_set_style(
-        &ProgressStyle::with_template("{wide_bar} {pos}/{len} ({elapsed})")
+        &ProgressStyle::with_template("{wide_bar} {pos}/{len} ({elapsed}) (eta: {eta})")
             .expect("valid template"),
     );
 
