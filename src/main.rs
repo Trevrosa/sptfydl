@@ -26,7 +26,7 @@ use sptfydl::{
 };
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Stdio, exit},
     sync::Arc,
     time::Instant,
@@ -46,6 +46,10 @@ struct Args {
     /// The number of concurrent searches.
     #[arg(short, long, default_value_t = 3)]
     searchers: usize,
+
+    /// The path to output to.
+    #[arg(short = 'P', long)]
+    path: Option<PathBuf>,
 
     /// Be a bit more verbose. Can be applied more than once (-v, -vv)
     #[arg(short, long, action = ArgAction::Count)]
@@ -134,7 +138,9 @@ async fn main() -> anyhow::Result<()> {
     .context("extracting youtube urls from spotify")?;
     let search_time = start.elapsed();
 
-    if let Some(path) = extraction.name.as_ref() {
+    if let Some(path) = args.path {
+        ytdlp_args.extend(["-P".to_string(), path.to_string_lossy().into_owned()]);
+    } else if let Some(path) = extraction.name.as_ref() {
         ytdlp_args.extend(["-P".to_string(), path.clone()]);
     }
 
@@ -387,6 +393,7 @@ async fn run_tagger(path: &Path, metadata: Metadata, url: &str, should_tag: bool
     }
 }
 
+// TODO: maybe this should be changed to specific tag impls because different tags have different ways of representing multi-value tags
 #[instrument(skip(metadata, url))]
 async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()> {
     let mut file = Probe::open(path)?.guess_file_type()?.read()?;
