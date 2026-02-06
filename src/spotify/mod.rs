@@ -14,7 +14,6 @@ use tokio::{sync::mpsc, time::sleep};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use std::{
-    collections::VecDeque,
     fmt::Write as FmtWrite,
     fs,
     io::{Write, stdin, stdout},
@@ -78,14 +77,14 @@ pub async fn extract_spotify(
     let (mut spotify_tracks, name) = get_from_url(spotify_url, token.as_ref()).await?;
     let first_name = spotify_tracks[0].name.clone();
 
-    info!("got {} tracks", spotify_tracks.len());
+    info!("got {} tracks", spotify_tracks.len(),);
 
     let raw_cookie = get_cookies(no_interaction)?;
 
     let cookie = parse_cookie(&raw_cookie).ok_or(anyhow!("failed to parse cookie"))?;
     let auth = Browser::new(cookie);
 
-    let (urls, warnings, failed) = if spotify_tracks.len() == 1 {
+    let (tracks, warnings, failed) = if spotify_tracks.len() == 1 {
         let track = spotify_tracks.pop().expect("len is 1");
         debug!("metadata: {track:#?}");
         info!("searching for {}", track.name);
@@ -122,11 +121,11 @@ pub async fn extract_spotify(
         let _ = fs::write(path, report);
     }
 
-    if urls.is_empty() {
+    if tracks.is_empty() {
         Err(anyhow!("got no urls"))
     } else {
         Ok(Extraction {
-            tracks: urls,
+            tracks,
             name,
             warnings,
             failures: failed.len(),
@@ -181,7 +180,7 @@ async fn search_many(
 
     let mut searcher_handles = Vec::with_capacity(searchers);
     for task in 0..searchers {
-        let urls = results_tx.clone();
+        let output = results_tx.clone();
         let tracks = tracks_rx.clone();
         let warns = warns_tx.clone();
         let failed = fails_tx.clone();
@@ -228,7 +227,8 @@ async fn search_many(
                     }
 
                     let url = results[choice].link_or_default().to_string();
-                    urls.send((i, (url, track)))
+                    output
+                        .send((i, (url, track)))
                         .await
                         .expect("shouldnt be closed");
                 }
@@ -244,11 +244,11 @@ async fn search_many(
 
     debug!("total setup took {:?}", start.elapsed());
 
-    let mut urls = Vec::with_capacity(expected_tracks);
+    let mut tracks = Vec::with_capacity(expected_tracks);
     async {
-        while let Some(url) = results_rx.recv().await {
+        while let Some(track) = results_rx.recv().await {
             Span::current().pb_inc(1);
-            urls.push(url);
+            tracks.push(track);
         }
     }
     .instrument(pb_span)
@@ -256,7 +256,7 @@ async fn search_many(
 
     debug!("getting artists in bulk");
 
-    let tracks = simp_to_full(urls, spotify_auth).await;
+    let tracks = promote(tracks, spotify_auth).await;
 
     for handle in searcher_handles {
         if let Err(err) = handle.await {
@@ -274,21 +274,22 @@ async fn search_many(
     (tracks, warnings, failed)
 }
 
+/// Converts a tuple (`track_num`, (`url`, `spotify_track`)) into a `Vec<(usize, Track)>` by requesting for full [`search::SpotifyArtist`]s in bulk.
 #[inline]
-async fn simp_to_full(
+async fn promote(
     urls: Vec<(usize, (String, SpotifyTrack))>,
     spotify_auth: &str,
 ) -> Vec<(usize, Track)> {
-    let simplified_artists: Vec<&Vec<SimplifiedArtist>> =
-        urls.iter().map(|t| &t.1.1.artists).collect();
-    let artists = get_many_artists(&simplified_artists, spotify_auth)
+    let artists: Vec<&Vec<SimplifiedArtist>> = urls.iter().map(|t| &t.1.1.artists).collect();
+    let artists = get_many_artists(&artists, spotify_auth)
         .await
         .expect("failed to get artists");
-    let mut artists = VecDeque::from(artists);
+
+    assert_eq!(urls.len(), artists.len());
 
     let mut tracks = Vec::with_capacity(urls.len());
-    for (track_num, (url, track)) in urls {
-        let metadata = track.into_metadata(artists.pop_front().expect("it must be in range"));
+    for ((track_num, (url, track)), artists) in urls.into_iter().zip(artists) {
+        let metadata = track.into_metadata(artists);
         tracks.push((track_num, Track::new(url, metadata)));
     }
 

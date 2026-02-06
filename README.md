@@ -2,6 +2,14 @@
 
 A simple and *fast* CLI tool that allows you to download Spotify tracks, albums, and playlists. Requires [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
+## Features
+- Concurrent searching and downloading
+- Metadata tagging for supported formats
+- Light on spotify api calls
+- Customisable, see cli args below
+
+---
+
 ```
 a tool to download spotify links
 

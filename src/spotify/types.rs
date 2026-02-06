@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use crate::spotify::search::{ExternalIds, SpotifyArtist};
 
 #[derive(Debug)]
@@ -17,10 +19,20 @@ impl Extraction {
 }
 
 /// A track, with its `url` and `metadata`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Track {
     pub url: String,
     pub metadata: Metadata,
+}
+
+impl Debug for Track {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Track")
+            .field("url", &self.url)
+            .field("name", &self.metadata.name)
+            .field("artists", &self.metadata.artists)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Track {
@@ -31,7 +43,7 @@ impl Track {
 }
 
 /// Contains select fields of [`SpotifyTrack`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Metadata {
     pub cover_url: String,
     pub disc_number: u32,
@@ -43,13 +55,15 @@ pub struct Metadata {
     pub external_ids: ExternalIds,
     pub track_number: u32,
     pub album_name: String,
+    pub album_tracks: u32,
     /// y-m-d
     pub release_date: String,
 }
 
 impl Metadata {
+    /// can turn `self.artists` into (`artists_tag_value`, `genres_tag_value`)
     #[inline]
-    pub fn artists_and_genres(artists: Vec<SpotifyArtist>, separator: char) -> (String, String) {
+    pub fn to_tag_values(artists: Vec<SpotifyArtist>, separator: char) -> (String, String) {
         let (artists, genres): (Vec<_>, Vec<_>) =
             artists.into_iter().map(SpotifyArtist::into_tuple).unzip();
 
