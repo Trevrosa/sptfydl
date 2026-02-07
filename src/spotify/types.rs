@@ -78,6 +78,10 @@ impl Metadata {
 
 impl SpotifyTrack {
     /// Turns `self` into [`Metadata`] with `artists`.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if `self.album` is `None`, or if `self.external_ids` is `None`.
     #[must_use]
     pub fn into_metadata(self, artists: Vec<SpotifyArtist>) -> Metadata {
         let (album_name, cover_url, release_date, album_tracks) =

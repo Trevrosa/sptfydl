@@ -198,8 +198,11 @@ async fn search_many(
                     debug!("metadata: {track:#?}");
                     info!("{:?}", track.name);
 
-                    let artists: Vec<&str> =
-                        track.artists.iter().map(|a| a.name.as_str()).collect();
+                    let artists: Vec<&str> = track
+                        .artists
+                        .iter()
+                        .filter_map(|a| a.name.as_deref())
+                        .collect();
                     let query = format!("{} {}", track.name, artists.join(" "));
 
                     let Some(mut results) = search_retrying(&query, &yt_auth, retries).await else {

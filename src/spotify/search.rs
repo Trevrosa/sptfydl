@@ -85,9 +85,11 @@ pub struct ExternalIds {
     // pub upc: String,
 }
 
+// has `None`s because tracks/episodes/shows from playlists don't always have the fields.
 #[derive(Deserialize, Debug, Clone)]
 pub struct SimplifiedArtist {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     id: Option<String>,
 }
@@ -154,11 +156,15 @@ impl Debug for SpotifyTrack {
 // so we can join for names
 impl Borrow<str> for SimplifiedArtist {
     fn borrow(&self) -> &str {
-        &self.name
+        self.name.as_ref().unwrap()
     }
 }
 
 /// Turn [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
+///
+/// # Errors
+///
+/// Will fail if any artist could not be found, or if any request fails to be sent.
 ///
 /// # Panics
 ///
@@ -171,13 +177,19 @@ pub async fn bulk_artists(
     Ok(artists.pop().unwrap())
 }
 
+impl PartialEq<SimplifiedArtist> for SpotifyArtist {
+    fn eq(&self, other: &SimplifiedArtist) -> bool {
+        Some(&self.name) == other.name.as_ref()
+    }
+}
+
 /// Turn multiple [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
 ///
 /// Order is preserved.
 ///
 /// # Errors
 ///
-/// Will fail if any artist could not be found, or if the request fails to be sent.
+/// Will fail if any artist could not be found, or if any request fails to be sent.
 ///
 /// # Panics
 ///
@@ -214,7 +226,7 @@ pub async fn bulk_many_artists(
             .map(|wanted| {
                 all_artists
                     .iter()
-                    .find(|a| a.name == wanted.name)
+                    .find(|artist| *artist == wanted)
                     .expect("must exist")
                     .clone()
             })
@@ -270,6 +282,12 @@ async fn get_resp<T: for<'a> Deserialize<'a>>(url: &str, access_token: &str) -> 
     if !resp.status().is_success() {
         return Err(anyhow!("got {}: {:?}", resp.status(), resp.text().await));
     }
+
+    // let string = resp.text().await?;
+    // std::fs::write("a", &string);
+    // let jd = &mut serde_json::Deserializer::from_str(&string);
+
+    // Ok(serde_path_to_error::deserialize(jd)?)
 
     Ok(resp.json::<T>().await?)
 }

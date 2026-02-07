@@ -100,7 +100,7 @@ pub async fn find_playlist_tracks(
     // if `next_page` is set, we need to go to next pagination
     let mut next_page = resp.tracks.next;
     while let Some(cur_page) = next_page {
-        debug!("getting next page of results");
+        info!("getting next page of tracks");
 
         let cur_page: PlaylistPagination = get_resp(&cur_page, access_token).await?;
         debug!("got {} tracks", cur_page.items.len());
