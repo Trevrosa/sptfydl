@@ -8,7 +8,9 @@ A simple and *fast* CLI tool that allows you to download Spotify tracks, albums,
 - Light on spotify api calls (~1 request per 100 playlist tracks, +1 request per 50 total artists, +1 request per 50 tracks (only for album downloads))
 - Customisable, see cli args below
 
----
+## Usage
+
+Install via `cargo install sptfydl` or from [releases](https://github.com/Trevrosa/sptfydl/releases/latest).
 
 ```
 a tool to download spotify links
