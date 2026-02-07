@@ -7,12 +7,6 @@ pub use search::get_from_url;
 pub mod types;
 pub use types::{Extraction, Metadata, Track};
 
-use anyhow::anyhow;
-use dialoguer::Select;
-use indicatif::ProgressStyle;
-use tokio::{sync::mpsc, time::sleep};
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-
 use std::{
     fmt::Write as FmtWrite,
     fs,
@@ -21,11 +15,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::anyhow;
+use dialoguer::Select;
+use indicatif::ProgressStyle;
+use tokio::{sync::mpsc, time::sleep};
 use tracing::{Instrument, Span, debug, info, info_span, trace, warn};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use crate::{
     load, load_str, save, save_str,
-    spotify::search::{SimplifiedArtist, SpotifyTrack, get_artists, get_many_artists},
+    spotify::search::{SimplifiedArtist, SpotifyTrack, bulk_artists, bulk_many_artists},
     ytmusic::{
         SearchResult as YtSearchResult,
         auth::{Browser, parse_cookie},
@@ -281,7 +280,7 @@ async fn promote(
     spotify_auth: &str,
 ) -> Vec<(usize, Track)> {
     let artists: Vec<&Vec<SimplifiedArtist>> = urls.iter().map(|t| &t.1.1.artists).collect();
-    let artists = get_many_artists(&artists, spotify_auth)
+    let artists = bulk_many_artists(&artists, spotify_auth)
         .await
         .expect("failed to get artists");
 
@@ -304,7 +303,7 @@ async fn search_one(
     no_interaction: bool,
     retries: usize,
 ) -> SearchResult {
-    let artists = get_artists(&track.artists, spotify_auth).await.unwrap();
+    let artists = bulk_artists(&track.artists, spotify_auth).await.unwrap();
     let artist_strs: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
     let query = format!("{} {}", track.name, artist_strs.join(" "));
     if let Some(mut results) = search_retrying(&query, yt_auth, retries).await {

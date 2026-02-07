@@ -1,3 +1,10 @@
+use std::{
+    path::{Path, PathBuf},
+    process::{Stdio, exit},
+    sync::Arc,
+    time::Instant,
+};
+
 use anyhow::Context;
 use clap::{ArgAction, Parser};
 use console::Term;
@@ -23,13 +30,6 @@ use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::Subsc
 use sptfydl::{
     CLIENT, load, save,
     spotify::{Metadata, Track, extract_spotify, search::REQUESTS},
-};
-
-use std::{
-    path::{Path, PathBuf},
-    process::{Stdio, exit},
-    sync::Arc,
-    time::Instant,
 };
 
 #[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
@@ -147,27 +147,15 @@ async fn main() -> anyhow::Result<()> {
 
     let start = Instant::now();
     if extraction.tracks.len() == 1 {
-        let (_, track) = extraction.tracks[0].clone();
-        let Track { mut url, metadata } = track;
-        info!("downloading {url}");
-        for attempt in 0..=args.download_retries {
-            let (output_file, new_url) =
-                ytdlp(url, None, attempt, 0, args.show_ytdlp, &ytdlp_args).await;
-
-            url = new_url;
-
-            if let Some(path) = output_file {
-                run_tagger(
-                    path.as_ref(),
-                    metadata,
-                    &url,
-                    !args.no_metadata,
-                    !args.no_mp3,
-                )
-                .await;
-                break;
-            }
-        }
+        download_one(
+            extraction.tracks[0].1.clone(),
+            &ytdlp_args,
+            args.download_retries,
+            args.show_ytdlp,
+            !args.no_metadata,
+            !args.no_mp3,
+        )
+        .await;
     } else {
         download_many(
             extraction.tracks.clone(),
@@ -327,6 +315,28 @@ async fn download_many(
     }
 }
 
+async fn download_one(
+    track: Track,
+    ytdlp_args: &[String],
+    retry_limit: usize,
+    show_ytdlp: bool,
+    should_tag: bool,
+    mp3: bool,
+) {
+    let Track { mut url, metadata } = track;
+    info!("downloading {url}");
+    for attempt in 0..=retry_limit {
+        let (output_file, new_url) = ytdlp(url, None, attempt, 0, show_ytdlp, ytdlp_args).await;
+
+        url = new_url;
+
+        if let Some(path) = output_file {
+            run_tagger(path.as_ref(), metadata, &url, should_tag, mp3).await;
+            break;
+        }
+    }
+}
+
 /// returns a (`output_file`, `url`). `output_file` will always be `Some` on success.
 #[inline]
 #[instrument(skip(url, args, retry, track_padding, show_output), fields(try = retry + 1))]
@@ -429,7 +439,9 @@ async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()
         tag.insert_text(ItemKey::ParentalAdvisory, "1".to_string());
     }
 
-    tag.insert_text(ItemKey::Isrc, metadata.external_ids.isrc);
+    if let Some(isrc) = metadata.external_ids.isrc {
+        tag.insert_text(ItemKey::Isrc, isrc);
+    }
 
     let year = metadata
         .release_date

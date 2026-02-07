@@ -1,3 +1,11 @@
+pub mod album;
+pub mod playlist;
+pub mod track;
+
+pub use album::find_album_tracks;
+pub use playlist::find_playlist_tracks;
+pub use track::find_track;
+
 use std::{
     borrow::Borrow,
     fmt::Debug,
@@ -7,10 +15,9 @@ use std::{
 use anyhow::anyhow;
 use reqwest::IntoUrl;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tracing::{debug, info};
+use tracing::debug;
 
-use crate::{CLIENT, spotify::Metadata};
+use crate::{CLIENT, IterExt};
 
 /// Parse the spotify id from `url` and get a list of [`SpotifyTrack`]s and the name (of the playlist or album, if `url` is one.)
 ///
@@ -48,11 +55,6 @@ pub async fn get_from_url(
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Image {
-    url: String,
-}
-
 /// Only some of the fields.
 ///
 /// <https://developer.spotify.com/documentation/web-api/reference/get-track>
@@ -70,41 +72,39 @@ pub struct SpotifyTrack {
     pub track_number: u32,
 }
 
-// so we can join for ids
-impl Borrow<str> for SpotifyTrack {
-    fn borrow(&self) -> &str {
-        &self.id
-    }
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Image {
+    url: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ExternalIds {
-    pub isrc: String,
+    #[serde(default)]
+    pub isrc: Option<String>,
     // pub ean: String,
     // pub upc: String,
 }
 
-impl SpotifyTrack {
-    /// Turns `self` into [`Metadata`] with `artists`.
-    #[must_use]
-    pub fn into_metadata(self, artists: Vec<SpotifyArtist>) -> Metadata {
-        let (album_name, cover_url, release_date, album_tracks) =
-            SpotifyTrack::extract_album(self.album).expect("must be some");
-        Metadata {
-            artists,
-            disc_number: self.disc_number,
-            name: self.name,
-            spotify_id: self.id,
-            explicit: self.explicit,
-            external_ids: self.external_ids.expect("must be some"),
-            track_number: self.track_number,
-            release_date,
-            cover_url,
-            album_name,
-            album_tracks,
-        }
-    }
+#[derive(Deserialize, Debug, Clone)]
+pub struct SimplifiedArtist {
+    pub name: String,
+    #[serde(default)]
+    id: Option<String>,
+}
 
+#[derive(Deserialize, Clone)]
+pub struct SpotifyArtist {
+    pub name: String,
+    pub genres: Vec<String>,
+}
+
+impl Debug for SpotifyArtist {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+impl SpotifyTrack {
     // is an associated function to allow partial moves
     /// Returns (`album_name`, `cover_url`, `release_date`, `total_tracks`).
     ///
@@ -151,23 +151,10 @@ impl Debug for SpotifyTrack {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct SimplifiedArtist {
-    pub name: String,
-    id: String,
-}
-
 // so we can join for names
 impl Borrow<str> for SimplifiedArtist {
     fn borrow(&self) -> &str {
         &self.name
-    }
-}
-
-// so we can join for ids
-impl Borrow<str> for &SimplifiedArtist {
-    fn borrow(&self) -> &str {
-        &self.id
     }
 }
 
@@ -176,15 +163,13 @@ impl Borrow<str> for &SimplifiedArtist {
 /// # Panics
 ///
 /// Should never panic.
-pub async fn get_artists(
+pub async fn bulk_artists(
     from: &[SimplifiedArtist],
     access_token: &str,
 ) -> anyhow::Result<Vec<SpotifyArtist>> {
-    let mut artists = get_many_artists(&[&from.to_vec()], access_token).await?;
+    let mut artists = bulk_many_artists(&[&from.to_vec()], access_token).await?;
     Ok(artists.pop().unwrap())
 }
-
-// TODO: cleanup some of this code?
 
 /// Turn multiple [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
 ///
@@ -197,7 +182,7 @@ pub async fn get_artists(
 /// # Panics
 ///
 /// Should never panic.
-pub async fn get_many_artists(
+pub async fn bulk_many_artists(
     artist_arrays: &[&Vec<SimplifiedArtist>],
     access_token: &str,
 ) -> anyhow::Result<Vec<Vec<SpotifyArtist>>> {
@@ -213,7 +198,7 @@ pub async fn get_many_artists(
     {
         let artists: Vec<&SimplifiedArtist> = artist_arrays.iter().copied().flatten().collect();
         for chunk in artists.chunks(50) {
-            let ids = chunk.join(",");
+            let ids = chunk.iter().filter_map(|a| a.id.as_ref()).join(",");
             let resp: SpotifyArtists =
                 get_resp(&format!("{ARTIST_API}/?ids={ids}"), access_token).await?;
             all_artists.extend(resp.artists);
@@ -240,93 +225,11 @@ pub async fn get_many_artists(
     Ok(result)
 }
 
-#[derive(Deserialize, Clone)]
-pub struct SpotifyArtist {
-    pub name: String,
-    pub genres: Vec<String>,
-}
-
-impl Debug for SpotifyArtist {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
+// so we can join for ids
+impl Borrow<str> for SpotifyTrack {
+    fn borrow(&self) -> &str {
+        &self.id
     }
-}
-
-/// Find a track by its `id` using `access_token` for authorization.
-///
-/// # Errors
-///
-/// See [`get_resp`].
-pub async fn find_track(
-    id: impl AsRef<str>,
-    access_token: impl AsRef<str>,
-) -> anyhow::Result<SpotifyTrack> {
-    const TRACK_API: &str = "https://api.spotify.com/v1/tracks";
-
-    let track_id = id.as_ref();
-    let access_token = access_token.as_ref();
-
-    info!("finding track id `{track_id}`");
-
-    let resp: SpotifyTrack = get_resp(&format!("{TRACK_API}/{track_id}"), access_token).await?;
-
-    Ok(resp)
-}
-
-#[derive(Deserialize, Debug)]
-struct Album {
-    name: String,
-    artists: Vec<SimplifiedArtist>,
-    tracks: AlbumTracks,
-    total_tracks: u32,
-    release_date: String,
-    images: Vec<Image>,
-}
-
-#[derive(Deserialize, Debug)]
-struct AlbumTracks {
-    items: Vec<SpotifyTrack>,
-}
-
-/// Find an album's tracks by its `id` using `access_token` for authorization.
-///
-/// # Errors
-///
-/// See [`get_resp`].
-pub async fn find_album_tracks(
-    id: impl AsRef<str>,
-    access_token: impl AsRef<str>,
-) -> anyhow::Result<(Vec<SpotifyTrack>, String)> {
-    const ALBUM_API: &str = "https://api.spotify.com/v1/albums";
-
-    let id = id.as_ref();
-    let access_token = access_token.as_ref();
-
-    info!("finding album id `{id}`");
-
-    let resp: Album = get_resp(&format!("{ALBUM_API}/{id}"), access_token).await?;
-
-    let album_data = json!({
-        "total_tracks": resp.total_tracks,
-        "release_date": resp.release_date,
-        "images": resp.images,
-        "name": resp.name,
-    });
-
-    let mut tracks = resp.tracks.items;
-
-    let full_tracks = bulk_tracks(&tracks, access_token).await?;
-
-    assert_eq!(tracks.len(), full_tracks.len());
-
-    for (track, full) in tracks.iter_mut().zip(full_tracks) {
-        track.album = Some(album_data.clone());
-        track.external_ids = full.external_ids;
-    }
-
-    let artists = resp.artists.join(", ");
-
-    Ok((tracks, format!("{} - {artists}", resp.name)))
 }
 
 async fn bulk_tracks(
@@ -348,74 +251,6 @@ async fn bulk_tracks(
     }
 
     Ok(full_tracks)
-}
-
-#[derive(Deserialize, Debug)]
-struct Playlist {
-    name: String,
-    owner: PlaylistOwner,
-    tracks: PlaylistTracks,
-}
-
-#[derive(Deserialize, Debug)]
-struct PlaylistTracks {
-    total: u32,
-    next: Option<String>,
-    items: Vec<PlaylistTrack>,
-}
-
-#[derive(Deserialize, Debug)]
-struct PlaylistTrack {
-    track: Option<SpotifyTrack>,
-}
-
-#[derive(Deserialize, Debug)]
-struct PlaylistOwner {
-    display_name: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct PlaylistPagination {
-    next: Option<String>,
-    items: Vec<PlaylistTrack>,
-}
-
-/// Find a playlist's tracks by its `id` using `access_token` for authorization.
-///
-/// # Errors
-///
-/// See [`get_resp`].
-pub async fn find_playlist_tracks(
-    id: impl AsRef<str>,
-    access_token: impl AsRef<str>,
-) -> anyhow::Result<(Vec<SpotifyTrack>, String)> {
-    const PLAYLIST_API: &str = "https://api.spotify.com/v1/playlists";
-
-    let id = id.as_ref();
-    let access_token = access_token.as_ref();
-
-    info!("finding playlist id `{id}`");
-
-    let resp: Playlist = get_resp(&format!("{PLAYLIST_API}/{id}"), access_token).await?;
-
-    let mut tracks = Vec::with_capacity(resp.tracks.total as usize);
-
-    tracks.extend(resp.tracks.items.into_iter().filter_map(|p| p.track));
-
-    // if `next_page` is set, we need to go to next pagination
-    let mut next_page = resp.tracks.next;
-    while let Some(cur_page) = next_page {
-        debug!("getting next page of results");
-
-        let cur_page: PlaylistPagination = get_resp(&cur_page, access_token).await?;
-        debug!("got {} tracks", cur_page.items.len());
-        tracks.extend(cur_page.items.into_iter().filter_map(|p| p.track));
-        next_page = cur_page.next;
-    }
-
-    let owner = resp.owner.display_name.as_deref().unwrap_or("NO OWNER");
-
-    Ok((tracks, format!("{} - {owner}", resp.name)))
 }
 
 pub static REQUESTS: AtomicU16 = AtomicU16::new(0);

@@ -1,6 +1,9 @@
 use std::fmt::Debug;
 
-use crate::spotify::search::{ExternalIds, SpotifyArtist};
+use crate::{
+    IterExt,
+    spotify::search::{ExternalIds, SpotifyArtist, SpotifyTrack},
+};
 
 #[derive(Debug)]
 pub struct Extraction {
@@ -67,17 +70,31 @@ impl Metadata {
         let (artists, genres): (Vec<_>, Vec<_>) =
             artists.into_iter().map(SpotifyArtist::into_tuple).unzip();
 
-        let mut genres = genres.iter().flatten().fold(String::new(), |mut acc, g| {
-            acc.push_str(g);
-            acc.push_str(separator);
-            acc
-        });
-        // remove trailling sep
-        for _ in 0..separator.len() {
-            genres.pop();
-        }
+        let genres = genres.iter().flatten().join("; ");
 
         (artists.join(separator), genres)
+    }
+}
+
+impl SpotifyTrack {
+    /// Turns `self` into [`Metadata`] with `artists`.
+    #[must_use]
+    pub fn into_metadata(self, artists: Vec<SpotifyArtist>) -> Metadata {
+        let (album_name, cover_url, release_date, album_tracks) =
+            SpotifyTrack::extract_album(self.album).expect("must be some");
+        Metadata {
+            artists,
+            disc_number: self.disc_number,
+            name: self.name,
+            spotify_id: self.id,
+            explicit: self.explicit,
+            external_ids: self.external_ids.expect("must be some"),
+            track_number: self.track_number,
+            release_date,
+            cover_url,
+            album_name,
+            album_tracks,
+        }
     }
 }
 

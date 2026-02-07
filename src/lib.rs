@@ -1,10 +1,11 @@
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
     sync::{LazyLock, OnceLock},
 };
+
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 pub mod spotify;
@@ -83,4 +84,59 @@ pub fn save_str(contents: &str, name: &str) -> io::Result<()> {
 pub fn load_str(name: &str) -> io::Result<String> {
     let file = fs::read_to_string(save_dir().join(name))?;
     Ok(file)
+}
+
+pub trait IterExt<I: Iterator> {
+    /// Joins the iterator to a string with separator `sep`.
+    fn join(self, sep: &str) -> String;
+}
+
+impl<I: Iterator> IterExt<I> for I
+where
+    I::Item: AsRef<str>,
+{
+    fn join(self, sep: &str) -> String {
+        crate::join(self, sep)
+    }
+}
+
+/// Joins an iterator `I` to a string with separator `sep`.
+pub fn join<I: Iterator>(iter: I, sep: &str) -> String
+where
+    I::Item: AsRef<str>,
+{
+    let mut joined = iter.fold(String::new(), |mut acc, cur| {
+        acc.push_str(cur.as_ref());
+        acc.push_str(sep);
+        acc
+    });
+
+    for _ in 0..sep.len() {
+        joined.pop();
+    }
+
+    joined
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::IterExt;
+
+    #[test]
+    fn join() {
+        let list = vec!["1", "2", "3"];
+
+        assert_eq!(list.iter().join(","), "1,2,3");
+        assert_eq!(list.iter().join(", "), "1, 2, 3");
+        assert_eq!(list.iter().map(ToString::to_string).join(", "), "1, 2, 3");
+
+        let list = ["one", "two", "three"].map(ToString::to_string);
+
+        assert_eq!(list.iter().join(","), "one,two,three");
+        assert_eq!(list.iter().join(", "), "one, two, three");
+
+        let list = ["h", "i", "!"].repeat(500);
+
+        assert_ne!(list.iter().join(",").pop(), Some(','));
+    }
 }
