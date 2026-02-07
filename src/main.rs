@@ -409,21 +409,26 @@ async fn run_tagger(path: &Path, metadata: Metadata, url: &str, should_tag: bool
 async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()> {
     let mut file = Probe::open(path)?.guess_file_type()?.read()?;
 
-    debug!("tagging file {path:?}");
+    debug!("tagging file");
 
     let mut tag = Tag::new(file.primary_tag_type());
 
     // album & cover
-    tag.set_album(metadata.album_name);
-    let cover = CLIENT.get(metadata.cover_url).send().await?;
-    let mime_type: Option<MimeType> = cover
-        .headers()
-        .get("content-type")
-        .iter()
-        .find_map(|h| h.to_str().map(MimeType::from_str).ok());
-    let image = cover.bytes().await?;
-    let picture = Picture::new_unchecked(PictureType::CoverFront, mime_type, None, image.to_vec());
-    tag.push_picture(picture);
+    if let Some(album_name) = metadata.album_name {
+        tag.set_album(album_name);
+    }
+    if let Some(cover_url) = metadata.cover_url {
+        let cover = CLIENT.get(cover_url).send().await?;
+        let mime_type: Option<MimeType> = cover
+            .headers()
+            .get("content-type")
+            .iter()
+            .find_map(|h| h.to_str().map(MimeType::from_str).ok());
+        let image = cover.bytes().await?;
+        let picture =
+            Picture::new_unchecked(PictureType::CoverFront, mime_type, None, image.to_vec());
+        tag.push_picture(picture);
+    }
 
     // artists & genres
     let (artists, genres) = Metadata::to_tag_values(metadata.artists, "; ");
@@ -443,17 +448,19 @@ async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()
         tag.insert_text(ItemKey::Isrc, isrc);
     }
 
-    let year = metadata
+    if let Some(year) = metadata
         .release_date
-        .split('-')
-        .next()
-        .unwrap_or(&metadata.release_date);
-    if let Ok(year) = year.parse() {
+        .as_ref()
+        .and_then(|r| r.split('-').next())
+        .and_then(|y| y.parse().ok())
+    {
         tag.set_year(year);
     }
 
     tag.set_track(metadata.track_number);
-    tag.set_track_total(metadata.album_tracks);
+    if let Some(album_tracks) = metadata.album_tracks {
+        tag.set_track_total(album_tracks);
+    }
 
     tag.set_comment(format!(
         r"

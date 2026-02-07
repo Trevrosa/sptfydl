@@ -1,3 +1,8 @@
+//! A library for downloading Spotify tracks via YouTube Music.
+//!
+//! This library provides functionality to search for tracks on Spotify and YouTube Music,
+//! and download audio files with proper metadata.
+
 use std::{
     env, fs, io,
     path::{Path, PathBuf},

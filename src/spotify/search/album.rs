@@ -2,6 +2,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
+use crate::IterExt;
+
 use super::{Image, SimplifiedArtist, SpotifyTrack, bulk_tracks, get_resp};
 
 #[derive(Deserialize, Debug)]
@@ -24,6 +26,10 @@ struct AlbumTracks {
 /// # Errors
 ///
 /// See [`get_resp`].
+///
+/// # Panics
+///
+/// Will panic if the `external_id` of any track could not be found.
 pub async fn find_album_tracks(
     id: impl AsRef<str>,
     access_token: impl AsRef<str>,
@@ -55,7 +61,11 @@ pub async fn find_album_tracks(
         track.external_ids = full.external_ids;
     }
 
-    let artists = resp.artists.join(", ");
+    let artists = resp
+        .artists
+        .iter()
+        .filter_map(|a| a.name.as_deref())
+        .join(", ");
 
     Ok((tracks, format!("{} - {artists}", resp.name)))
 }

@@ -7,7 +7,6 @@ pub use playlist::find_playlist_tracks;
 pub use track::find_track;
 
 use std::{
-    borrow::Borrow,
     fmt::Debug,
     sync::atomic::{AtomicU16, Ordering},
 };
@@ -91,13 +90,14 @@ pub struct SimplifiedArtist {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
-    id: Option<String>,
+    pub id: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct SpotifyArtist {
     pub name: String,
     pub genres: Vec<String>,
+    id: String,
 }
 
 impl Debug for SpotifyArtist {
@@ -128,7 +128,7 @@ impl SpotifyTrack {
             total_tracks: u32,
         }
 
-        let mut album: Album = serde_json::from_value(album?).expect("must exist");
+        let mut album: Album = serde_json::from_value(album?).ok()?;
         let cover_url = album.images.swap_remove(0).url;
 
         Some((
@@ -153,13 +153,6 @@ impl Debug for SpotifyTrack {
     }
 }
 
-// so we can join for names
-impl Borrow<str> for SimplifiedArtist {
-    fn borrow(&self) -> &str {
-        self.name.as_ref().unwrap()
-    }
-}
-
 /// Turn [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
 ///
 /// # Errors
@@ -179,21 +172,19 @@ pub async fn bulk_artists(
 
 impl PartialEq<SimplifiedArtist> for SpotifyArtist {
     fn eq(&self, other: &SimplifiedArtist) -> bool {
-        Some(&self.name) == other.name.as_ref()
+        Some(&self.id) == other.id.as_ref()
     }
 }
 
 /// Turn multiple [`SimplifiedArtist`]s into [`SpotifyArtist`]s. Does bulk requests, chunking by 50.
+///
+/// Make sure all passed [`SimplifiedArtist`]s have an id.
 ///
 /// Order is preserved.
 ///
 /// # Errors
 ///
 /// Will fail if any artist could not be found, or if any request fails to be sent.
-///
-/// # Panics
-///
-/// Should never panic.
 pub async fn bulk_many_artists(
     artist_arrays: &[&Vec<SimplifiedArtist>],
     access_token: &str,
@@ -210,7 +201,12 @@ pub async fn bulk_many_artists(
     {
         let artists: Vec<&SimplifiedArtist> = artist_arrays.iter().copied().flatten().collect();
         for chunk in artists.chunks(50) {
-            let ids = chunk.iter().filter_map(|a| a.id.as_ref()).join(",");
+            let ids = chunk
+                .iter()
+                // if `name` is None even if `id` is Some, something is wrong.
+                .filter(|a| a.name.is_some())
+                .filter_map(|a| a.id.as_ref())
+                .join(",");
             let resp: SpotifyArtists =
                 get_resp(&format!("{ARTIST_API}/?ids={ids}"), access_token).await?;
             all_artists.extend(resp.artists);
@@ -223,25 +219,14 @@ pub async fn bulk_many_artists(
     for array in artist_arrays {
         let artists = array
             .iter()
-            .map(|wanted| {
-                all_artists
-                    .iter()
-                    .find(|artist| *artist == wanted)
-                    .expect("must exist")
-                    .clone()
-            })
+            // accept that some artists won't be found
+            .filter_map(|wanted| all_artists.iter().find(|artist| *artist == wanted).cloned())
             .collect();
+        // `artists` will at least be vec![]
         result.push(artists);
     }
 
     Ok(result)
-}
-
-// so we can join for ids
-impl Borrow<str> for SpotifyTrack {
-    fn borrow(&self) -> &str {
-        &self.id
-    }
 }
 
 async fn bulk_tracks(
@@ -257,7 +242,7 @@ async fn bulk_tracks(
 
     let mut full_tracks = Vec::with_capacity(tracks.len());
     for track in tracks.chunks(50) {
-        let ids = track.join(",");
+        let ids = track.iter().map(|t| &t.id).join(",");
         let resp: Tracks = get_resp(&format!("{TRACK_API}/?ids={ids}"), access_token).await?;
         full_tracks.extend(resp.tracks);
     }

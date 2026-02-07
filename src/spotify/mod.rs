@@ -23,11 +23,12 @@ use tracing::{Instrument, Span, debug, info, info_span, trace, warn};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use crate::{
-    load, load_str, save, save_str,
+    IterExt, load, load_str, save, save_str,
     spotify::search::{SimplifiedArtist, SpotifyTrack, bulk_artists, bulk_many_artists},
     ytmusic::{
         SearchResult as YtSearchResult,
         auth::{Browser, parse_cookie},
+        search::SearchFilter,
     },
 };
 
@@ -198,11 +199,7 @@ async fn search_many(
                     debug!("metadata: {track:#?}");
                     info!("{:?}", track.name);
 
-                    let artists: Vec<&str> = track
-                        .artists
-                        .iter()
-                        .filter_map(|a| a.name.as_deref())
-                        .collect();
+                    let artists = track.artists.iter().filter_map(|a| a.name.as_deref());
                     let query = format!("{} {}", track.name, artists.join(" "));
 
                     let Some(mut results) = search_retrying(&query, &yt_auth, retries).await else {
@@ -256,13 +253,13 @@ async fn search_many(
     .instrument(pb_span)
     .await;
 
-    debug!("getting artists in bulk");
+    info!("getting artist data");
 
     let tracks = promote(tracks, spotify_auth).await;
 
     for handle in searcher_handles {
         if let Err(err) = handle.await {
-            warn!("a downloader failed: {err}");
+            warn!("a searcher failed: {err}");
         }
     }
 
@@ -282,7 +279,7 @@ async fn promote(
     urls: Vec<(usize, (String, SpotifyTrack))>,
     spotify_auth: &str,
 ) -> Vec<(usize, Track)> {
-    let artists: Vec<&Vec<SimplifiedArtist>> = urls.iter().map(|t| &t.1.1.artists).collect();
+    let artists: Vec<&Vec<SimplifiedArtist>> = urls.iter().map(|u| &u.1.1.artists).collect();
     let artists = bulk_many_artists(&artists, spotify_auth)
         .await
         .expect("failed to get artists");
@@ -353,7 +350,13 @@ async fn search_retrying(query: &str, auth: &str, retries: usize) -> Option<Vec<
             sleep(RETRY_DELAY).await;
         }
 
-        let searched = match ytmusic::search(query, None, auth).await {
+        let filter = if attempt > 0 {
+            None
+        } else {
+            Some(SearchFilter::Songs)
+        };
+
+        let searched = match ytmusic::search(query, filter, auth).await {
             Ok(resp) => resp,
             Err(err) => {
                 if retries > 0 {
