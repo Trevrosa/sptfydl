@@ -110,10 +110,10 @@ pub async fn extract_spotify(
     if !failed.is_empty() {
         warn!("{} songs failed, check report", failed.len());
 
-        let report = failed.iter().fold(String::new(), |mut report, (n, t)| {
+        let mut report = String::with_capacity(failed.len() * 150);
+        for (n, t) in &failed {
             let _ = writeln!(report, "track #{n}: {t:#?}");
-            report
-        });
+        }
 
         let name = name.as_deref().unwrap_or(&first_name);
         let path = format!("failed-{name}.txt");

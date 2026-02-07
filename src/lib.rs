@@ -1,8 +1,3 @@
-//! A library for downloading Spotify tracks via YouTube Music.
-//!
-//! This library provides functionality to search for tracks on Spotify and YouTube Music,
-//! and download audio files with proper metadata.
-
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -106,21 +101,19 @@ where
 }
 
 /// Joins an iterator `I` to a string with separator `sep`.
-pub fn join<I: Iterator>(iter: I, sep: &str) -> String
+pub fn join<I: Iterator>(mut iter: I, sep: &str) -> String
 where
     I::Item: AsRef<str>,
 {
-    let mut joined = iter.fold(String::new(), |mut acc, cur| {
-        acc.push_str(cur.as_ref());
+    let Some(first) = iter.next() else {
+        return String::new();
+    };
+
+    iter.fold(first.as_ref().to_string(), |mut acc, cur| {
         acc.push_str(sep);
+        acc.push_str(cur.as_ref());
         acc
-    });
-
-    for _ in 0..sep.len() {
-        joined.pop();
-    }
-
-    joined
+    })
 }
 
 #[cfg(test)]

@@ -368,6 +368,7 @@ async fn ytdlp(
         .stderr(Stdio::piped())
         .spawn();
     let Ok(mut ytdlp) = ytdlp else {
+        warn!("failed to spawn yt-dlp");
         return (None, url);
     };
 
