@@ -5,7 +5,7 @@ A simple and *fast* CLI tool that allows you to download Spotify tracks, albums,
 ## Features
 - Concurrent searching and downloading
 - Metadata tagging for supported formats
-- Light on spotify api calls
+- Light on spotify api calls (~1 request per 100 playlist tracks, +1 request per 50 total artists, +1 request per 50 tracks (only for album downloads))
 - Customisable, see cli args below
 
 ---
