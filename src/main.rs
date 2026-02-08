@@ -51,6 +51,10 @@ struct Args {
     #[arg(short = 'P', long)]
     path: Option<PathBuf>,
 
+    /// Prefer isrc for searches. Useful for when you want a specific recording of a song.
+    #[arg(long)]
+    isrc: bool,
+
     /// Be a bit more verbose. Can be applied more than once (-v, -vv)
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -134,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
         args.searchers,
         args.no_interaction,
         args.search_retries,
+        args.isrc,
     )
     .await
     .context("extracting youtube urls from spotify")?;

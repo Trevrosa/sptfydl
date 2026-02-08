@@ -58,6 +58,7 @@ pub async fn extract_spotify(
     searchers: usize,
     no_interaction: bool,
     retries: usize,
+    isrc: bool,
 ) -> anyhow::Result<Extraction> {
     let token = load::<AccessToken>(SPOTIFY_TOKEN_CONFIG_NAME);
 
@@ -94,6 +95,7 @@ pub async fn extract_spotify(
             token.as_ref(),
             no_interaction,
             retries,
+            isrc,
         )
         .await
     } else {
@@ -103,6 +105,7 @@ pub async fn extract_spotify(
             token.as_ref(),
             searchers,
             retries,
+            isrc,
         )
         .await
     };
@@ -150,6 +153,7 @@ async fn search_many(
     spotify_auth: &str,
     searchers: usize,
     retries: usize,
+    isrc: bool,
 ) -> SearchResult {
     let start = Instant::now();
     let expected_tracks = spotify_tracks.len();
@@ -199,9 +203,7 @@ async fn search_many(
                     debug!("metadata: {track:#?}");
                     info!("{:?}", track.name);
 
-                    let artists = track.artists.iter().filter_map(|a| a.name.as_deref());
-                    let query = format!("{} {}", track.name, artists.join(" "));
-
+                    let query = preferred_query(&track, isrc);
                     let Some(mut results) = search_retrying(&query, &yt_auth, retries).await else {
                         failed
                             .send((i + 1, track))
@@ -302,16 +304,17 @@ async fn search_one(
     spotify_auth: &str,
     no_interaction: bool,
     retries: usize,
+    isrc: bool,
 ) -> SearchResult {
     let artists = bulk_artists(&track.artists, spotify_auth).await.unwrap();
-    let artist_strs: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
-    let query = format!("{} {}", track.name, artist_strs.join(" "));
+    let query = preferred_query(&track, isrc);
+
     if let Some(mut results) = search_retrying(&query, yt_auth, retries).await {
         results[0].title.push_str("Best Result");
 
         debug!("got {} results", results.len());
 
-        let choice = if no_interaction {
+        let choice = if no_interaction || results.len() == 1 {
             let choice = results.iter().position(|r| r.video_id.is_some());
             debug!("default choice was {choice:?}");
             choice
@@ -332,13 +335,24 @@ async fn search_one(
         }
 
         let url = results[choice].link_or_default().to_string();
-        (
-            vec![(0, Track::new(url, track.into_metadata(artists)))],
-            warnings,
-            vec![],
-        )
+        let metadata = track.into_metadata(artists);
+
+        (vec![(0, Track::new(url, metadata))], warnings, vec![])
     } else {
         (vec![], vec![], vec![(0, track)])
+    }
+}
+
+fn preferred_query(track: &SpotifyTrack, isrc: bool) -> String {
+    if isrc && let Some(isrc) = track.external_ids.as_ref().and_then(|ids| ids.isrc.clone()) {
+        isrc
+    } else {
+        let artists = track
+            .artists
+            .iter()
+            .filter_map(|a| a.name.as_ref())
+            .join(" ");
+        format!("{} {artists}", track.name,)
     }
 }
 
