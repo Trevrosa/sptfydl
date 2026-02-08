@@ -28,6 +28,8 @@ Options:
           The number of concurrent searches [default: 3]
   -P, --path <PATH>
           The path to output to
+      --isrc
+          Prefer isrc for searches. Useful for when you want a specific recording of a song
   -v, --verbose...
           Be a bit more verbose. Can be applied more than once (-v, -vv)
       --show-ytdlp
