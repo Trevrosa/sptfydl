@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, ValueEnum};
 use console::Term;
 use dialoguer::{Input, Password};
 use indicatif::{HumanDuration, ProgressStyle};
@@ -32,12 +32,28 @@ use sptfydl::{
     spotify::{Metadata, Track, extract_spotify, search::REQUESTS},
 };
 
+#[allow(unused)]
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum Format {
+    Mp3,
+    Flac,
+    Original,
+}
+
 #[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// The spotify url to download.
     url: String,
+
+    /// The format to download songs to.
+    #[arg(short, long, value_enum, default_value_t = Format::Mp3)]
+    format: Format,
+
+    /// The path to output to.
+    #[arg(short = 'P', long)]
+    path: Option<PathBuf>,
 
     /// The number of concurrent downloads.
     #[arg(short, long, default_value_t = 5)]
@@ -47,25 +63,9 @@ struct Args {
     #[arg(short, long, default_value_t = 3)]
     searchers: usize,
 
-    /// The path to output to.
-    #[arg(short = 'P', long)]
-    path: Option<PathBuf>,
-
     /// Prefer isrc for searches. Useful for when you want a specific recording of a song.
     #[arg(long)]
     isrc: bool,
-
-    /// Be a bit more verbose. Can be applied more than once (-v, -vv)
-    #[arg(short, long, action = ArgAction::Count)]
-    verbose: u8,
-
-    /// Show the output of ytdlp commands.
-    #[arg(long)]
-    show_ytdlp: bool,
-
-    /// Tell yt-dlp not to convert to mp3.
-    #[arg(long)]
-    no_mp3: bool,
 
     /// Disable tagging of mp3 files.
     #[arg(long)]
@@ -82,6 +82,14 @@ struct Args {
     /// The number of retries allowed for searches.
     #[arg(long, default_value_t = 3)]
     search_retries: usize,
+
+    /// Show the output of ytdlp commands.
+    #[arg(long)]
+    show_ytdlp: bool,
+
+    /// Be a bit more verbose. Can be applied more than once (-v, -vv)
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 
     /// Additional args for yt-dlp.
     #[arg(last = true)]
@@ -124,8 +132,15 @@ async fn main() -> anyhow::Result<()> {
     ytdlp_args.push("--no-playlist".to_string());
     ytdlp_args.push("--restrict-filenames".to_string());
 
-    if !args.no_mp3 {
-        ytdlp_args.extend(["--extract-audio", "--audio-format", "mp3"].map(ToString::to_string));
+    match args.format {
+        Format::Mp3 | Format::Flac => ytdlp_args.push("--extract-audio".to_string()),
+        Format::Original => (),
+    }
+
+    match args.format {
+        Format::Mp3 => ytdlp_args.extend(["--audio-format", "mp3"].map(ToString::to_string)),
+        Format::Flac => ytdlp_args.extend(["--audio-format", "flac"].map(ToString::to_string)),
+        Format::Original => (),
     }
 
     let oauth = get_spotify_oauth()?;
@@ -158,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
             args.download_retries,
             args.show_ytdlp,
             !args.no_metadata,
-            !args.no_mp3,
+            args.format == Format::Mp3,
         )
         .await;
     } else {
@@ -169,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
             args.download_retries,
             args.show_ytdlp,
             !args.no_metadata,
-            !args.no_mp3,
+            args.format == Format::Mp3,
         )
         .await;
     }
@@ -207,7 +222,7 @@ async fn download_many(
     retry_limit: usize,
     show_ytdlp: bool,
     tag_metadata: bool,
-    convert_mp3: bool,
+    mp3: bool,
 ) {
     let urls_len = urls.len();
 
@@ -287,7 +302,7 @@ async fn download_many(
                         .expect("shouldnt be closed");
 
                     if let Some(path) = output_file {
-                        run_tagger(path.as_ref(), metadata, &url, tag_metadata, convert_mp3).await;
+                        run_tagger(path.as_ref(), metadata, &url, tag_metadata, mp3).await;
                     } else {
                         failed_tx
                             .send((retry + 1, track_num, Track::new(url, metadata)))

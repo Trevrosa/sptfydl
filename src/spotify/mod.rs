@@ -343,6 +343,7 @@ async fn search_one(
     }
 }
 
+#[inline]
 fn preferred_query(track: &SpotifyTrack, isrc: bool) -> String {
     if isrc && let Some(isrc) = track.external_ids.as_ref().and_then(|ids| ids.isrc.clone()) {
         isrc
