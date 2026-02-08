@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(path) = args.path {
         ytdlp_args.extend(["-P".to_string(), path.to_string_lossy().into_owned()]);
     } else if let Some(path) = extraction.name.as_ref() {
-        ytdlp_args.extend(["-P".to_string(), path.clone()]);
+        ytdlp_args.extend(["-P".to_string(), path.replace('/', "_")]);
     }
 
     let start = Instant::now();
