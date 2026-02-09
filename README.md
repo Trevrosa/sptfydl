@@ -10,7 +10,7 @@ A simple and *fast* CLI tool that allows you to download Spotify tracks, albums,
 
 ## Usage
 
-Install via `cargo install sptfydl`, `cargo binstall sptfydl`, or from [releases](https://github.com/Trevrosa/sptfydl/releases/latest).
+Install via `cargo binstall sptfydl`, `cargo install sptfydl`, or from [releases](https://github.com/Trevrosa/sptfydl/releases/latest).
 
 ```
 a tool to download spotify links
