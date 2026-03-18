@@ -474,7 +474,7 @@ async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()
 
     if let Some(date) = metadata.release_date.as_deref() {
         // note y-m-d
-        let date: Vec<u16> = date.split('-').flat_map(str::parse).collect();
+        let date: Vec<u16> = date.split('-').flat_map(str::parse::<u16>).collect();
         tag.set_date(Timestamp {
             year: date[0],
             month: u8::try_from(date[1]).ok(),
