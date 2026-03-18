@@ -15,7 +15,7 @@ use lofty::{
     file::{AudioFile, TaggedFileExt},
     picture::{MimeType, Picture, PictureType},
     probe::Probe,
-    tag::{Accessor, ItemKey, Tag},
+    tag::{Accessor, ItemKey, Tag, items::Timestamp},
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -270,7 +270,7 @@ async fn download_many(
                     // meaning the channel will not close until all tasks end:
                     // using `try_recv()` ensures that the task will end instead of waiting forever.
                     let result = match tracks.recv().await {
-                        Ok((i, url)) => Ok((0, i + 1, url)),
+                        Ok((i, url)) => Ok((0, i, url)),
                         Err(_) => failed_rx.try_recv(),
                     };
 
@@ -446,9 +446,12 @@ async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()
             .iter()
             .find_map(|h| h.to_str().map(MimeType::from_str).ok());
         let image = cover.bytes().await?;
-        let picture =
-            Picture::new_unchecked(PictureType::CoverFront, mime_type, None, image.to_vec());
-        tag.push_picture(picture);
+
+        let mut picture = Picture::unchecked(image.to_vec()).pic_type(PictureType::CoverFront);
+        if let Some(mime_type) = mime_type {
+            picture = picture.mime_type(mime_type);
+        }
+        tag.push_picture(picture.build());
     }
 
     // artists & genres
@@ -469,13 +472,15 @@ async fn tagger(path: &Path, metadata: Metadata, url: &str) -> anyhow::Result<()
         tag.insert_text(ItemKey::Isrc, isrc);
     }
 
-    if let Some(year) = metadata
-        .release_date
-        .as_ref()
-        .and_then(|r| r.split('-').next())
-        .and_then(|y| y.parse().ok())
-    {
-        tag.set_year(year);
+    if let Some(date) = metadata.release_date.as_deref() {
+        // note y-m-d
+        let date: Vec<u16> = date.split('-').flat_map(str::parse).collect();
+        tag.set_date(Timestamp {
+            year: date[0],
+            month: u8::try_from(date[1]).ok(),
+            day: u8::try_from(date[2]).ok(),
+            ..Default::default()
+        });
     }
 
     tag.set_track(metadata.track_number);

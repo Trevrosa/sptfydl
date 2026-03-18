@@ -167,8 +167,11 @@ async fn search_many(
     debug!("channel setup took {:?}", start.elapsed());
 
     tokio::spawn(async move {
-        for track in spotify_tracks.into_iter().enumerate() {
-            tracks_tx.send(track).await.expect("channel should be open");
+        for (i, track) in spotify_tracks.into_iter().enumerate() {
+            tracks_tx
+                .send((i + 1, track))
+                .await
+                .expect("channel should be open");
         }
     });
 
